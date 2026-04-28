@@ -19,6 +19,7 @@
 #include "summary.h"
 #include "bpb.h"
 #include "fat.h"
+#include "scan.h"
 #include "prt.h"
 
 #ifndef CHKDISK_VERSION
@@ -88,6 +89,12 @@ static u8 dispatch(char letter)
         }
         /* Phase 2: FAT tables. */
         total_errs += fat_check(&fs);
+
+        /* Phase 3: directory walk + cluster bitmap. */
+        {
+            int srv = scan_run(&fs);
+            if (srv > 0) total_errs += srv;
+        }
     } else {
         prt_str("checkdsk: f_mount rc=");
         prt_dec((unsigned long)rc);

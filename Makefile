@@ -1,7 +1,6 @@
 APP        = chkdsk
 VPATH      = src
-SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c summary.c bpb.c fat.c ff.c ffsystem.c
-# bitmap.c -- enabled at Stage 3 (cluster bitmap for directory walk)
+SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c summary.c bpb.c fat.c chain.c bitmap.c scan.c ff.c ffsystem.c
 SDK_DIR   ?= ../sdcc-sprinter-sdk/
 CRT0_PAGE2 ?= 0
 # Stage 0 layout: code occupies WIN1+WIN2 (~32 KB), stack at 0xBFFF.
