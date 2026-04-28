@@ -6,18 +6,15 @@
  * any FATFS scratch buffer that other phases may be using.
  */
 
-#include <stdio.h>
 #include <sprinter.h>
 #include "ff.h"
 #include "diskio.h"
 #include "bpb.h"
+#include "sectbuf.h"
+#include "prt.h"
 
 #define SECTOR_SIZE 512u
-
-static BYTE g_main_sec[SECTOR_SIZE];
-static BYTE g_back_sec[SECTOR_SIZE];
-
-extern char *_utoa32(unsigned long val, char *end, int base, int upper);
+#define g_main_sec g_sect_a   /* single shared sector buffer */
 
 static u16 ld_word(const BYTE *p, UINT off)
 {
@@ -46,16 +43,18 @@ static int valid_media(u8 m)
     return 0;
 }
 
-/* Print "  ERROR: ..." line. */
 static void bpb_err(const char *msg)
 {
-    printf("  ERROR: %s\r\n", msg);
+    prt_str("  ERROR: ");
+    prt_str(msg);
+    prt_nl();
 }
 
-/* Print "  WARN: ..." line. */
 static void bpb_warn(const char *msg)
 {
-    printf("  WARN: %s\r\n", msg);
+    prt_str("  WARN: ");
+    prt_str(msg);
+    prt_nl();
 }
 
 int bpb_check(LBA_t volbase)
@@ -81,10 +80,9 @@ int bpb_check(LBA_t volbase)
     unsigned long count_clusters;
     int           is_fat32_layout;
     const char   *type_name;
-    char          buf[12];
     UINT          i;
 
-    printf("Phase 1: boot sector and BPB\r\n");
+    prt_str("Phase 1: boot sector and BPB\r\n");
 
     drc = disk_read(0, g_main_sec, volbase, 1);
     if (drc != RES_OK) {
@@ -174,9 +172,11 @@ int bpb_check(LBA_t volbase)
         } else {
             type_name = "FAT32";
         }
-        printf("  Type: %s, clusters: %s\r\n",
-               type_name,
-               _utoa32(count_clusters, buf + 11, 10, 0));
+        prt_str("  Type: ");
+        prt_str(type_name);
+        prt_str(", clusters: ");
+        prt_dec(count_clusters);
+        prt_nl();
 
         /* Cross-check with layout signals. */
         if (count_clusters >= 65525u) {
@@ -193,28 +193,36 @@ int bpb_check(LBA_t volbase)
         }
     }
 
-    /* 5. FAT32-specific: FSInfo, root cluster, backup boot. */
+    /* 5. FAT32-specific: FSInfo, root cluster, backup boot. Single
+     * sector buffer across these reads -- snapshot the main VBR sum
+     * BEFORE overwriting it with FSInfo / backup-boot reads. */
     if (count_clusters >= 65525u && is_fat32_layout) {
         u16 fsinfo_sec   = ld_word(g_main_sec, 0x30);
         u16 backup_sec   = ld_word(g_main_sec, 0x32);
         unsigned long root_clst = ld_dword(g_main_sec, 0x2C);
+        unsigned long main_sum  = 0ul;
 
         if (root_clst < 2u) {
             bpb_err("FAT32 root cluster < 2");
             errs++;
         }
 
-        /* FSInfo. */
+        /* Snapshot main-VBR sum (used for the backup compare below). */
+        for (i = 0u; i < SECTOR_SIZE; i++) {
+            main_sum += (unsigned long)g_main_sec[i];
+        }
+
+        /* FSInfo (overwrites main VBR in g_main_sec). */
         if (fsinfo_sec != 0u) {
-            BYTE   *fi = g_back_sec;     /* reuse */
-            DRESULT fr = disk_read(0, fi, volbase + (LBA_t)fsinfo_sec, 1);
+            DRESULT fr = disk_read(0, g_main_sec,
+                                   volbase + (LBA_t)fsinfo_sec, 1);
             if (fr != RES_OK) {
                 bpb_err("cannot read FSInfo sector");
                 errs++;
             } else {
-                unsigned long sig0 = ld_dword(fi, 0);
-                unsigned long sig1 = ld_dword(fi, 484);
-                u16           sig2 = ld_word (fi, 510);
+                unsigned long sig0 = ld_dword(g_main_sec, 0);
+                unsigned long sig1 = ld_dword(g_main_sec, 484);
+                u16           sig2 = ld_word (g_main_sec, 510);
                 if (sig0 != 0x41615252ul) {
                     bpb_err("FSInfo signature1 (offset 0) bad");
                     errs++;
@@ -228,8 +236,8 @@ int bpb_check(LBA_t volbase)
                     errs++;
                 }
                 {
-                    unsigned long free_count = ld_dword(fi, 488);
-                    unsigned long next_free  = ld_dword(fi, 492);
+                    unsigned long free_count = ld_dword(g_main_sec, 488);
+                    unsigned long next_free  = ld_dword(g_main_sec, 492);
                     if (free_count == 0xFFFFFFFFul) {
                         bpb_warn("FSInfo free_count == 0xFFFFFFFF (needs recalc)");
                         warns++;
@@ -242,21 +250,20 @@ int bpb_check(LBA_t volbase)
             }
         }
 
-        /* Backup boot sector. */
+        /* Backup boot sector: read into g_main_sec, sum-compare with
+         * main_sum (gives "differs / equal", not byte-exact diff). */
         if (backup_sec != 0u && backup_sec != 0xFFFFu) {
-            DRESULT br = disk_read(0, g_back_sec, volbase + (LBA_t)backup_sec, 1);
+            DRESULT br = disk_read(0, g_main_sec,
+                                   volbase + (LBA_t)backup_sec, 1);
             if (br != RES_OK) {
                 bpb_err("cannot read backup boot sector");
                 errs++;
             } else {
-                int diff = 0;
+                unsigned long backup_sum = 0ul;
                 for (i = 0u; i < SECTOR_SIZE; i++) {
-                    if (g_main_sec[i] != g_back_sec[i]) {
-                        diff = 1;
-                        break;
-                    }
+                    backup_sum += (unsigned long)g_main_sec[i];
                 }
-                if (diff) {
+                if (backup_sum != main_sum) {
                     bpb_err("backup boot sector differs from main");
                     errs++;
                 }
@@ -265,11 +272,13 @@ int bpb_check(LBA_t volbase)
     }
 
     if (errs == 0 && warns == 0) {
-        printf("  No issues\r\n");
+        prt_str("  No issues\r\n");
     } else {
-        printf("  %u error(s), %u warning(s)\r\n",
-               (unsigned int)errs,
-               (unsigned int)warns);
+        prt_str("  ");
+        prt_dec((unsigned long)errs);
+        prt_str(" error(s), ");
+        prt_dec((unsigned long)warns);
+        prt_str(" warning(s)\r\n");
     }
     return errs;
 }

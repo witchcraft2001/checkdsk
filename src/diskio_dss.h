@@ -25,21 +25,19 @@
  */
 void diskio_dss_set_device(u8 disk_num, u16 desc_addr);
 
+/* Set the LBA offset added to every sector argument FatFs passes to
+ * disk_read / disk_write. FatFs is built with FF_MULTI_PARTITION = 0
+ * so it sees each volume as a whole disk; volume.c installs the real
+ * partition LBA here so the BIOS receives the absolute sector. */
+void diskio_dss_set_partition_offset(unsigned long lba);
+
 /* Last BIOS error code captured by the inline-asm trampolines.
  * Useful for diagnostics; FatFs only sees RES_ERROR / RES_OK. */
 u8 diskio_dss_last_error(void);
 
-/* LBA of the last sector that was attempted (read or write), split as
- * high and low 16-bit halves. Useful for narrowing down disk_err
- * failures during stage-0 bring-up. */
-u16 diskio_dss_last_lba_hi(void);
-u16 diskio_dss_last_lba_lo(void);
-
-/* Same value as a 32-bit u32, for cross-checking the split halves. */
-unsigned long diskio_dss_last_lba(void);
-
-/* Raw sector argument FatFs handed to disk_read, captured before any
- * local (u16) conversion. Stage-0 only. */
-unsigned long diskio_dss_dbg_raw_sector(void);
+/* Multi-sector batched read in a single BIOS DRV_READ call.
+ * `lba` is FatFs-relative (partition offset is added). count is 1..255.
+ * Returns 0 on success, 1 on error. Used by diskio_batch only. */
+u8 diskio_dss_read_batch(unsigned long lba, u8 count, u8 *dst);
 
 #endif /* CHKDSK_DISKIO_DSS_H */

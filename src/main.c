@@ -1,16 +1,14 @@
 /*
- * main.c -- CHKDSK stage 0 entry point.
+ * main.c -- CHKDSK entry point.
  *
- * Stage 0 scope:
+ * Pipeline (per specs.md):
  *   - parse a single argument "<drive>:" (or "/?" for help)
  *   - resolve the drive letter to a physical device + partition
- *   - mount via FatFs and print the volume summary
- *   - allocate + release a bitmap to validate page memory machinery
- *
- * No integrity checks yet; those start at stage 1.
+ *   - Phase 1 (bpb_check): validate the boot sector and BPB
+ *   - if mount succeeds: print summary and run Phase 2 (fat_check)
+ *   - return non-zero if either phase reported errors
  */
 
-#include <stdio.h>
 #include <string.h>
 #include <sprinter.h>
 #include "ff.h"
@@ -18,11 +16,10 @@
 #include "cmdline.h"
 #include "diskio_dss.h"
 #include "volume.h"
-#include "bitmap.h"
 #include "summary.h"
 #include "bpb.h"
-
-extern char *_utoa32(unsigned long val, char *end, int base, int upper);
+#include "fat.h"
+#include "prt.h"
 
 #ifndef CHKDISK_VERSION
 #define CHKDISK_VERSION "0.0.dev"
@@ -30,16 +27,15 @@ extern char *_utoa32(unsigned long val, char *end, int base, int upper);
 
 static void print_banner(void)
 {
-    printf("checkdsk " CHKDISK_VERSION " for Sprinter DSS\r\n");
+    prt_str("checkdsk " CHKDISK_VERSION " for Sprinter DSS\r\n");
 }
 
 static void print_usage(void)
 {
     print_banner();
-    printf("Usage: CHKDSK <drive>:\r\n");
-    printf("  <drive>: A..J on stage 0 (A,B = floppy; C..F = IDE0 master\r\n");
-    printf("           partitions 1..4; G..J = IDE0 slave 1..4)\r\n");
-    printf("  /?       this help\r\n");
+    prt_str("Usage: CHKDSK <drive>:\r\n");
+    prt_str("  <drive>:  A, B (floppies) or C, D, ... (IDE partitions)\r\n");
+    prt_str("  /?        this help\r\n");
 }
 
 static u8 dispatch(char letter)
@@ -48,35 +44,36 @@ static u8 dispatch(char letter)
     FATFS    fs;
     FRESULT  rc;
     int      vrc;
-    int      phase1_errs;
+    int      total_errs;
     int      mount_ok;
-    u32      partition_lba;
     char     path[3];
 
-    phase1_errs = 0;
-    mount_ok    = 0;
+    total_errs = 0;
+    mount_ok   = 0;
 
     vrc = volume_resolve(letter, &vol);
     if (vrc == VOL_ERR_BAD_LETTER) {
-        printf("checkdsk: invalid drive letter '%c'\r\n", letter);
+        prt_str("checkdsk: invalid drive letter '");
+        prt_chr(letter);
+        prt_str("'\r\n");
         return 2u;
     }
     if (vrc == VOL_ERR_UNSUPPORTED) {
-        printf("checkdsk: drive '%c:' not supported on stage 0 (A..J only)\r\n",
-               letter);
+        prt_str("checkdsk: drive '");
+        prt_chr(letter);
+        prt_str(":' not present\r\n");
         return 2u;
     }
 
     volume_apply(&vol);
-    partition_lba = vol.partition_lba;
 
-    /* Phase 1: boot sector and BPB integrity check. Read-only.
-     * Runs first so we still get diagnostic output for unmountable
-     * volumes (like an unformatted IDE partition). */
-    phase1_errs = bpb_check((LBA_t)partition_lba);
+    /* Phase 1: BPB integrity. Runs before mount so unmountable volumes
+     * still produce diagnostic output. After volume_apply the diskio
+     * offset shifts sector 0 to the partition's VBR. */
+    total_errs += bpb_check((LBA_t)0u);
 
-    /* FatFs mount + summary. If Phase 1 found problems, mount may
-     * still succeed (FatFs is permissive) or fail; either is fine. */
+    /* FatFs mount (FF_MULTI_PARTITION = 0; partition offset is set in
+     * diskio so FatFs sees the partition as a whole disk). */
     path[0] = '0';
     path[1] = ':';
     path[2] = '\0';
@@ -89,38 +86,19 @@ static u8 dispatch(char letter)
             f_unmount(path);
             return 1u;
         }
+        /* Phase 2: FAT tables. */
+        total_errs += fat_check(&fs);
     } else {
-        printf("checkdsk: f_mount rc=%u, bios_err=%u (summary skipped)\r\n",
-               (unsigned int)rc,
-               (unsigned int)diskio_dss_last_error());
+        prt_str("checkdsk: f_mount rc=");
+        prt_dec((unsigned long)rc);
+        prt_str(" err=");
+        prt_dec((unsigned long)diskio_dss_last_error());
+        prt_str(" (summary skipped)\r\n");
     }
 
-    /* Stage 0 acceptance: confirm bitmap allocator works above 48KB.
-     * Skip if mount failed -- without n_fatent we have no cluster count.
-     * For a real volume we will base the size on cluster count; here
-     * we use the actual cluster count of the mounted volume. */
-    if (mount_ok) {
-        u32 num_clusters = (u32)(fs.n_fatent - 2u);
-        if (num_clusters > 0u) {
-            if (!bitmap_init(num_clusters)) {
-                printf("checkdsk: bitmap_init: out of page memory\r\n");
-                f_unmount(path);
-                return 1u;
-            }
-            bitmap_set(0u);
-            bitmap_set(num_clusters - 1u);
-            if (bitmap_get(0u) != 1u || bitmap_get(num_clusters - 1u) != 1u) {
-                printf("checkdsk: bitmap self-test failed\r\n");
-                bitmap_release();
-                f_unmount(path);
-                return 1u;
-            }
-            bitmap_release();
-        }
-        f_unmount(path);
-    }
+    if (mount_ok) f_unmount(path);
 
-    return phase1_errs > 0 ? 1u : 0u;
+    return total_errs > 0 ? 1u : 0u;
 }
 
 void main(void)
@@ -146,9 +124,8 @@ void main(void)
         return;
     }
 
-    /* Expect "X:" -- letter followed by colon. */
     if (argv[0][0] == '\0' || argv[0][1] != ':' || argv[0][2] != '\0') {
-        printf("checkdsk: argument must be a single drive like \"C:\"\r\n");
+        prt_str("checkdsk: argument must be a single drive like \"C:\"\r\n");
         dss_exit(2u);
         return;
     }

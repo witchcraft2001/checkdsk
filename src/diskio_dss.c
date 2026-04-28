@@ -35,6 +35,7 @@
 /* Selected by volume.c before f_mount. Default 0xFF means uninitialised. */
 static u8  g_dev_disk    = 0xFFu;
 static u16 g_dev_desc    = 0u;
+static u32 g_part_offset = 0ul;
 
 /* Globals consumed by the BIOS-call trampolines. */
 static u8  g_bios_disk   = 0u;
@@ -44,10 +45,6 @@ static u16 g_bios_buf    = 0u;
 static u8  g_bios_count  = 0u;
 static u8  g_bios_err    = 0u;
 
-/* Raw sector argument as FatFs passed it into disk_read, captured
- * before any (u16) conversions. Used during stage-0 bring-up to tell
- * apart "FatFs gave a bad LBA" from "we corrupted it locally". */
-static u32 g_dbg_raw_sector = 0ul;
 
 void diskio_dss_set_device(u8 disk_num, u16 desc_addr)
 {
@@ -55,32 +52,14 @@ void diskio_dss_set_device(u8 disk_num, u16 desc_addr)
     g_dev_desc = desc_addr;
 }
 
+void diskio_dss_set_partition_offset(unsigned long lba)
+{
+    g_part_offset = (u32)lba;
+}
+
 u8 diskio_dss_last_error(void)
 {
     return g_bios_err;
-}
-
-u16 diskio_dss_last_lba_hi(void)
-{
-    return g_bios_lba_hi;
-}
-
-u16 diskio_dss_last_lba_lo(void)
-{
-    return g_bios_lba_lo;
-}
-
-unsigned long diskio_dss_last_lba(void)
-{
-    unsigned long v;
-    v  = ((unsigned long)g_bios_lba_hi) << 16;
-    v |= (unsigned long)g_bios_lba_lo;
-    return v;
-}
-
-unsigned long diskio_dss_dbg_raw_sector(void)
-{
-    return (unsigned long)g_dbg_raw_sector;
 }
 
 /* RST #08 with C = 0x55 (DRV_READ).
@@ -160,12 +139,10 @@ DRESULT disk_read(BYTE pdrv, BYTE *buf, LBA_t sector, UINT count)
     if (pdrv != 0u || g_dev_disk == 0xFFu) return RES_NOTRDY;
     if (count == 0u) return RES_PARERR;
 
-    g_dbg_raw_sector = (u32)sector;
-
     g_bios_disk  = g_dev_disk;
     g_bios_count = 1u;
     for (i = 0u; i < count; i++) {
-        u32 lba = (u32)sector + (u32)i;
+        u32 lba = (u32)sector + (u32)i + g_part_offset;
         g_bios_lba_lo = (u16)(lba & 0xFFFFu);
         g_bios_lba_hi = (u16)((lba >> 16) & 0xFFFFu);
         g_bios_buf    = (u16)(buf + (i * 512u));
@@ -173,6 +150,23 @@ DRESULT disk_read(BYTE pdrv, BYTE *buf, LBA_t sector, UINT count)
     }
     return RES_OK;
 }
+
+u8 diskio_dss_read_batch(unsigned long lba, u8 count, u8 *dst)
+{
+    u32 abs_lba;
+
+    if (g_dev_disk == 0xFFu) return 1u;
+    if (count == 0u) return 1u;
+
+    abs_lba = (u32)lba + g_part_offset;
+    g_bios_disk   = g_dev_disk;
+    g_bios_lba_lo = (u16)(abs_lba & 0xFFFFul);
+    g_bios_lba_hi = (u16)((abs_lba >> 16) & 0xFFFFul);
+    g_bios_buf    = (u16)dst;
+    g_bios_count  = count;
+    return bios_drv_read();
+}
+
 
 DRESULT disk_write(BYTE pdrv, const BYTE *buf, LBA_t sector, UINT count)
 {
@@ -184,7 +178,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buf, LBA_t sector, UINT count)
     g_bios_disk  = g_dev_disk;
     g_bios_count = 1u;
     for (i = 0u; i < count; i++) {
-        u32 lba = (u32)sector + (u32)i;
+        u32 lba = (u32)sector + (u32)i + g_part_offset;
         g_bios_lba_lo = (u16)(lba & 0xFFFFu);
         g_bios_lba_hi = (u16)((lba >> 16) & 0xFFFFu);
         g_bios_buf    = (u16)(buf + (i * 512u));

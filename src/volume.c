@@ -7,14 +7,10 @@
 #include "diskio.h"
 #include "volume.h"
 #include "diskio_dss.h"
+#include "sectbuf.h"
 
-/* FatFs requires this symbol when FF_MULTI_PARTITION = 1. We update
- * VolToPart[0] at runtime from volume_apply() before calling f_mount. */
-PARTITION VolToPart[FF_VOLUMES] = {
-    { 0u, 0u }
-};
+#define g_mbr_sec g_sect_a
 
-static BYTE g_mbr_sec[512];
 
 /* IDE slot table. Order matches the BIOS device numbers (#80..#83) and
  * the physical descriptor table at #C1C0/#C1C8/#C1D0/#C1D8. */
@@ -102,6 +98,5 @@ int volume_resolve(char letter, volume_t *out)
 void volume_apply(const volume_t *vol)
 {
     diskio_dss_set_device(vol->disk, vol->desc);
-    VolToPart[0].pd = 0u;
-    VolToPart[0].pt = vol->part;
+    diskio_dss_set_partition_offset((unsigned long)vol->partition_lba);
 }

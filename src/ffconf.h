@@ -25,8 +25,11 @@
  * f_unlink / f_truncate. NOTE: read-only mode also removes f_getfree,
  * so the summary prints total bytes only (no free-bytes line). */
 
-#define FF_FS_MINIMIZE	0
-/* All API functions enabled. */
+#define FF_FS_MINIMIZE	2
+/* Removes f_stat, f_getfree, f_unlink, f_mkdir, f_truncate, f_rename
+ * AND f_opendir, f_readdir, f_closedir. checkdsk walks directories at
+ * the sector level itself (Stage 3), so the directory iterators are
+ * not needed; this drops several KB from ff.c. */
 
 #define FF_USE_FIND	0
 /* CHKDSK walks directories at sector level itself; no need for f_findfirst. */
@@ -39,8 +42,9 @@
 
 #define FF_USE_EXPAND	0
 #define FF_USE_CHMOD	0
-#define FF_USE_LABEL	1
-/* Need f_getlabel for the volume summary printed in stage 0. */
+#define FF_USE_LABEL	0
+/* checkdsk reads volume serial directly from the VBR (BS_VolID) and
+ * does not call f_getlabel / f_setlabel; disable to save code. */
 
 #define FF_USE_FORWARD	0
 
@@ -95,10 +99,11 @@
 
 #define FF_STR_VOLUME_ID	0
 
-#define FF_MULTI_PARTITION	1
-/* volume.c populates VolToPart[0] = { pdrv=0, partition_num } at runtime
-/  so f_mount selects the right MBR partition for the requested drive
-/  letter. See specs.md / Stage 0 / "Drive letter resolution". */
+#define FF_MULTI_PARTITION	0
+/* volume.c resolves the partition LBA itself from the MBR; diskio
+/  adds that offset to every disk_read/disk_write call so FatFs sees
+/  the partition as a whole-disk volume. Avoids the FF_MULTI_PARTITION
+/  code path and saves several KB in ff.c. */
 
 #define FF_MIN_SS	512
 #define FF_MAX_SS	512
