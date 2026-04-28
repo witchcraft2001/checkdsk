@@ -20,6 +20,7 @@
 #include "volume.h"
 #include "bitmap.h"
 #include "summary.h"
+#include "bpb.h"
 
 extern char *_utoa32(unsigned long val, char *end, int base, int upper);
 
@@ -47,7 +48,13 @@ static u8 dispatch(char letter)
     FATFS    fs;
     FRESULT  rc;
     int      vrc;
+    int      phase1_errs;
+    int      mount_ok;
+    u32      partition_lba;
     char     path[3];
+
+    phase1_errs = 0;
+    mount_ok    = 0;
 
     vrc = volume_resolve(letter, &vol);
     if (vrc == VOL_ERR_BAD_LETTER) {
@@ -61,31 +68,38 @@ static u8 dispatch(char letter)
     }
 
     volume_apply(&vol);
+    partition_lba = vol.partition_lba;
 
-    /* FatFs path uses logical volume id 0 (FF_STR_VOLUME_ID = 0, single
-     * volume); the user-facing letter is only for the summary line. */
+    /* Phase 1: boot sector and BPB integrity check. Read-only.
+     * Runs first so we still get diagnostic output for unmountable
+     * volumes (like an unformatted IDE partition). */
+    phase1_errs = bpb_check((LBA_t)partition_lba);
+
+    /* FatFs mount + summary. If Phase 1 found problems, mount may
+     * still succeed (FatFs is permissive) or fail; either is fine. */
     path[0] = '0';
     path[1] = ':';
     path[2] = '\0';
 
     memset(&fs, 0, sizeof(fs));
     rc = f_mount(&fs, path, 1);
-    if (rc != FR_OK) {
-        printf("checkdsk: f_mount failed (rc=%u, bios_err=%u)\r\n",
+    if (rc == FR_OK) {
+        mount_ok = 1;
+        if (summary_print(&fs, letter) != 0) {
+            f_unmount(path);
+            return 1u;
+        }
+    } else {
+        printf("checkdsk: f_mount rc=%u, bios_err=%u (summary skipped)\r\n",
                (unsigned int)rc,
                (unsigned int)diskio_dss_last_error());
-        return 1u;
-    }
-
-    if (summary_print(&fs, letter) != 0) {
-        f_unmount(path);
-        return 1u;
     }
 
     /* Stage 0 acceptance: confirm bitmap allocator works above 48KB.
+     * Skip if mount failed -- without n_fatent we have no cluster count.
      * For a real volume we will base the size on cluster count; here
      * we use the actual cluster count of the mounted volume. */
-    {
+    if (mount_ok) {
         u32 num_clusters = (u32)(fs.n_fatent - 2u);
         if (num_clusters > 0u) {
             if (!bitmap_init(num_clusters)) {
@@ -93,7 +107,6 @@ static u8 dispatch(char letter)
                 f_unmount(path);
                 return 1u;
             }
-            /* Sanity write/read at the boundaries. */
             bitmap_set(0u);
             bitmap_set(num_clusters - 1u);
             if (bitmap_get(0u) != 1u || bitmap_get(num_clusters - 1u) != 1u) {
@@ -104,10 +117,10 @@ static u8 dispatch(char letter)
             }
             bitmap_release();
         }
+        f_unmount(path);
     }
 
-    f_unmount(path);
-    return 0u;
+    return phase1_errs > 0 ? 1u : 0u;
 }
 
 void main(void)

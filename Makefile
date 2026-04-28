@@ -1,6 +1,6 @@
 APP        = chkdsk
 VPATH      = src
-SRCS       = main.c cmdline.c diskio_dss.c bitmap.c volume.c summary.c ff.c ffsystem.c
+SRCS       = main.c cmdline.c diskio_dss.c bitmap.c volume.c summary.c bpb.c ff.c ffsystem.c
 SDK_DIR   ?= ../sdcc-sprinter-sdk/
 CRT0_PAGE2 ?= 0
 # Stage 0 layout: code occupies WIN1+WIN2 (~32 KB), stack at 0xBFFF.

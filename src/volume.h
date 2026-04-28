@@ -1,21 +1,23 @@
 /*
  * volume.h -- drive-letter to physical-device + partition resolver.
  *
- * Stage 0 mapping (mirrors the default DSS scheme; see specs.md):
- *   A:  -> FDD0           (disk=0x00, desc=0xC1E0, part=0/whole)
- *   B:  -> FDD1           (disk=0x01, desc=0xC1E8, part=0/whole)
- *   C:  -> IDE0 master    (disk=0x80, desc=0xC1C0, part=1)
- *   D:  -> IDE0 master    part=2
- *   E:  -> IDE0 master    part=3
- *   F:  -> IDE0 master    part=4
- *   G:  -> IDE0 slave     (disk=0x81, desc=0xC1C8, part=1)
- *   H:  -> IDE0 slave     part=2
- *   I:  -> IDE0 slave     part=3
- *   J:  -> IDE0 slave     part=4
+ * Mapping algorithm (mirrors the actual DSS scheme observed on real
+ * hardware; the manual's "C: master part 1, D: master part 2..."
+ * example only applies when a single device has multiple partitions):
  *
- * Letters K..Z and CMOS #1E TR-DOS remapping are not supported; the
- * resolver returns VOL_ERR_UNSUPPORTED. See specs.md "Drive letter
- * resolution" for the architect feature-request behind this gap.
+ *   A: / B: -> FDD0 / FDD1 (descriptors #C1E0 / #C1E8, part = 0)
+ *   C:..    -> scan IDE slots in order
+ *                 #80 primary master   (#C1C0)
+ *                 #81 primary slave    (#C1C8)
+ *                 #82 secondary master (#C1D0)
+ *                 #83 secondary slave  (#C1D8)
+ *              for each device that is present and has a valid MBR,
+ *              walk partition entries 1..4 in order and count only
+ *              the ones with a non-zero starting LBA. The N-th such
+ *              partition (across all devices) gets the letter C+N.
+ *
+ * partition_lba is filled in at resolve time so callers can run
+ * Phase 1 (and beyond) without re-parsing the MBR.
  */
 
 #ifndef CHKDSK_VOLUME_H
@@ -28,14 +30,16 @@
 #define VOL_ERR_UNSUPPORTED 2   /* K..Z or any out-of-scope mapping */
 
 typedef struct {
-    u8  disk;       /* BIOS drive byte: 0x80/0x81/0x00/0x01/... */
-    u16 desc;       /* Address of 8-byte descriptor in system page */
-    u8  part;       /* 0 = whole disk (no MBR), 1..4 = MBR partition */
+    u8  disk;            /* BIOS drive byte: 0x80/0x81/0x00/0x01/... */
+    u16 desc;            /* Address of 8-byte descriptor in system page */
+    u8  part;            /* 0 = whole disk (no MBR), 1..4 = MBR partition */
+    u32 partition_lba;   /* LBA of the VBR (0 for whole-disk FDD) */
 } volume_t;
 
-/* Resolve a single ASCII letter (case-insensitive) into a volume_t.
- * Letter must be one of A..J on stage 0; anything else returns
- * VOL_ERR_BAD_LETTER (non-letter) or VOL_ERR_UNSUPPORTED (K..Z). */
+/* Resolve a single ASCII letter (case-insensitive) into a volume_t,
+ * including the partition's starting LBA. As a side effect this may
+ * call diskio_dss_set_device while scanning IDE devices; callers must
+ * still call volume_apply() afterwards to lock in the final selection. */
 int volume_resolve(char letter, volume_t *out);
 
 /* Configure the FatFs glue layer and VolToPart[0] so a subsequent
