@@ -1,1 +1,25 @@
+.DS_Store
+
+# Build artifacts
+build/
+**/_build/
+
+# Sprinter/SDCC outputs
+*.exe
+*.ihx
+*.lk
+*.map
+*.mem
+*.noi
+*.sym
+
+# Distribution
+dist/
+
+# Local-only wrappers (per CLAUDE.md "scripts must not contain local paths")
+run/*.local.sh
+
+# Caches
+temp/
+*/tmp/*
 specs.md

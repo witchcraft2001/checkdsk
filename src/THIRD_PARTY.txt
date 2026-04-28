@@ -1,0 +1,9 @@
+Third-party sources vendored into src/
+
+FatFs R0.16 by ChaN (elm-chan.org)
+  License: BSD-style (see ff.c header)
+  Files:   ff.c, ff.h, diskio.h, ffsystem.c, 00readme.txt, 00history.txt
+  Source:  https://elm-chan.org/fsw/ff/arc/ff16.zip
+  Note:    diskio.c sample replaced by diskio_dss.c (Sprinter BIOS glue).
+           ffunicode.c is omitted; pull it in when CHKDISK_USE_LFN=1.
+           ffconf.h is customized for checkdsk; see top of file.

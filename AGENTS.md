@@ -2,7 +2,7 @@
 
 - After every iteration of code changes, rebuild the affected artifacts before finishing the task.
 - For utility changes, rebuild the modified utility with its local `Makefile`.
-- When changes affect packaged outputs or release contents, regenerate `build/utils.img` and `dist/checkdsk.zip` via `run/create_floppy_image.sh`.
+- When changes affect packaged outputs or release contents, regenerate `build/chkdsk.img` and `dist/checkdsk.zip` via `run/create_floppy_image.sh`.
 - If a rebuild fails, report the failure clearly and do not present the iteration as complete.
 
 ## Development platform
