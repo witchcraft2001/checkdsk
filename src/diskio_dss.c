@@ -44,6 +44,11 @@ static u16 g_bios_buf    = 0u;
 static u8  g_bios_count  = 0u;
 static u8  g_bios_err    = 0u;
 
+/* Raw sector argument as FatFs passed it into disk_read, captured
+ * before any (u16) conversions. Used during stage-0 bring-up to tell
+ * apart "FatFs gave a bad LBA" from "we corrupted it locally". */
+static u32 g_dbg_raw_sector = 0ul;
+
 void diskio_dss_set_device(u8 disk_num, u16 desc_addr)
 {
     g_dev_disk = disk_num;
@@ -53,6 +58,29 @@ void diskio_dss_set_device(u8 disk_num, u16 desc_addr)
 u8 diskio_dss_last_error(void)
 {
     return g_bios_err;
+}
+
+u16 diskio_dss_last_lba_hi(void)
+{
+    return g_bios_lba_hi;
+}
+
+u16 diskio_dss_last_lba_lo(void)
+{
+    return g_bios_lba_lo;
+}
+
+unsigned long diskio_dss_last_lba(void)
+{
+    unsigned long v;
+    v  = ((unsigned long)g_bios_lba_hi) << 16;
+    v |= (unsigned long)g_bios_lba_lo;
+    return v;
+}
+
+unsigned long diskio_dss_dbg_raw_sector(void)
+{
+    return (unsigned long)g_dbg_raw_sector;
 }
 
 /* RST #08 with C = 0x55 (DRV_READ).
@@ -131,6 +159,8 @@ DRESULT disk_read(BYTE pdrv, BYTE *buf, LBA_t sector, UINT count)
 
     if (pdrv != 0u || g_dev_disk == 0xFFu) return RES_NOTRDY;
     if (count == 0u) return RES_PARERR;
+
+    g_dbg_raw_sector = (u32)sector;
 
     g_bios_disk  = g_dev_disk;
     g_bios_count = 1u;

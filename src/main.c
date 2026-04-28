@@ -14,11 +14,14 @@
 #include <string.h>
 #include <sprinter.h>
 #include "ff.h"
+#include "diskio.h"
 #include "cmdline.h"
 #include "diskio_dss.h"
 #include "volume.h"
 #include "bitmap.h"
 #include "summary.h"
+
+extern char *_utoa32(unsigned long val, char *end, int base, int upper);
 
 #ifndef CHKDISK_VERSION
 #define CHKDISK_VERSION "0.0.dev"
@@ -138,6 +141,7 @@ void main(void)
     }
 
     letter = argv[0][0];
+    if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
     print_banner();
     code = dispatch(letter);
     dss_exit(code);
