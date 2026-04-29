@@ -15,16 +15,10 @@
 #define CHAIN_NO_CACHE 0xFFFFFFFFul
 
 static LBA_t g_cached_sect = CHAIN_NO_CACHE;
-static u8    g_last_err    = 0u;
 
 void chain_invalidate(void)
 {
     g_cached_sect = CHAIN_NO_CACHE;
-}
-
-u8 chain_last_error(void)
-{
-    return g_last_err;
 }
 
 LBA_t chain_cluster_to_lba(vol_t *fs, DWORD clust)
@@ -37,7 +31,6 @@ static u8 load_fat_sector(LBA_t fat_sect)
 {
     if (g_cached_sect == fat_sect) return 1u;
     if (disk_read(0u, g_sect_a, fat_sect, 1u) != RES_OK) {
-        g_last_err    = diskio_dss_last_error();
         g_cached_sect = CHAIN_NO_CACHE;
         return 0u;
     }
@@ -51,8 +44,6 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
     LBA_t fat_sect;
     u16   in_off;
     u8    b0, b1, b2, b3;
-
-    g_last_err = 0u;
 
     if (clust >= fs->n_fatent) return CHAIN_READ_ERROR;
 

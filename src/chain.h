@@ -44,9 +44,6 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust);
  * overwrites g_sect_a. */
 void  chain_invalidate(void);
 
-/* BIOS error code from the last failing chain_get_entry, 0 if none. */
-u8    chain_last_error(void);
-
 /* Classify a value returned by chain_get_entry, taking the FS type
  * into account so FAT12 0xFF7 / FAT16 0xFFF7 / FAT32 0x0FFFFFF7 all
  * read as bad / EOC. clust is the value, not the index. */

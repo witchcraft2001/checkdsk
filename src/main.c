@@ -37,17 +37,21 @@ static void print_usage(void)
     prt_str("  /?        this help\r\n");
 }
 
+/* Big aggregates kept in BSS so dispatch's stack frame stays small --
+ * the deep call chain (scan_run -> walk_tree -> step -> walk_chain ->
+ * chain_get_entry) needs the headroom. */
+static volume_t g_vol;
+static vol_t    g_fs;
+
 static u8 dispatch(char letter)
 {
-    volume_t vol;
-    vol_t    fs;
-    int      mrc;
-    int      vrc;
-    int      total_errs;
+    int mrc;
+    int vrc;
+    int total_errs;
 
     total_errs = 0;
 
-    vrc = volume_resolve(letter, &vol);
+    vrc = volume_resolve(letter, &g_vol);
     if (vrc == VOL_ERR_BAD_LETTER) {
         prt_str("checkdsk: invalid drive letter '");
         prt_chr(letter);
@@ -61,25 +65,24 @@ static u8 dispatch(char letter)
         return 2u;
     }
 
-    volume_apply(&vol);
+    volume_apply(&g_vol);
 
-    /* Phase 1: BPB integrity. Runs before mount so unmountable volumes
-     * still produce diagnostic output. After volume_apply the diskio
-     * offset shifts sector 0 to the partition's VBR. */
-    total_errs += bpb_check((LBA_t)0u);
+    /* Mount first so the BPB diagnostic can speak in terms of the
+     * already-parsed vol_t -- avoids parsing the BPB twice. */
+    mrc = vol_mount(&g_fs, 0u);
+    total_errs += bpb_check(&g_fs, mrc);
 
-    mrc = vol_mount(&fs, 0u);
     if (mrc == VOL_OK) {
-        if (summary_print(&fs, letter) != 0) {
-            vol_unmount(&fs);
+        if (summary_print(&g_fs, letter) != 0) {
+            vol_unmount(&g_fs);
             return 1u;
         }
-        total_errs += fat_check(&fs);
+        total_errs += fat_check(&g_fs);
         {
-            int srv = scan_run(&fs);
+            int srv = scan_run(&g_fs);
             if (srv > 0) total_errs += srv;
         }
-        vol_unmount(&fs);
+        vol_unmount(&g_fs);
     } else {
         prt_str("checkdsk: vol_mount rc=");
         prt_dec((unsigned long)mrc);
@@ -91,36 +94,38 @@ static u8 dispatch(char letter)
     return total_errs > 0 ? 1u : 0u;
 }
 
+/* Same rationale as g_vol/g_fs above -- keep cmdbuf out of the stack. */
+static char  g_cmdbuf[CHKDSK_MAX_CMDLINE];
+static char *g_argv[CHKDSK_MAX_ARGV];
+
 void main(void)
 {
-    char  cmdbuf[CHKDSK_MAX_CMDLINE];
-    char *argv[CHKDSK_MAX_ARGV];
-    int   argc;
-    char  letter;
-    u8    code;
+    int  argc;
+    char letter;
+    u8   code;
 
-    cmd_read_safe(cmdbuf, (int)sizeof(cmdbuf));
-    argc = cmd_parse(cmdbuf, argv);
+    cmd_read_safe(g_cmdbuf, (int)sizeof(g_cmdbuf));
+    argc = cmd_parse(g_cmdbuf, g_argv);
 
     if (argc == 0) {
         print_usage();
         dss_exit(2u);
         return;
     }
-    if (cmd_strieq(argv[0], "/?") || cmd_strieq(argv[0], "-h") ||
-        cmd_strieq(argv[0], "--help")) {
+    if (cmd_strieq(g_argv[0], "/?") || cmd_strieq(g_argv[0], "-h") ||
+        cmd_strieq(g_argv[0], "--help")) {
         print_usage();
         dss_exit(0u);
         return;
     }
 
-    if (argv[0][0] == '\0' || argv[0][1] != ':' || argv[0][2] != '\0') {
+    if (g_argv[0][0] == '\0' || g_argv[0][1] != ':' || g_argv[0][2] != '\0') {
         prt_str("checkdsk: argument must be a single drive like \"C:\"\r\n");
         dss_exit(2u);
         return;
     }
 
-    letter = argv[0][0];
+    letter = g_argv[0][0];
     if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
     print_banner();
     code = dispatch(letter);

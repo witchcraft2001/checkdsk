@@ -18,11 +18,14 @@
 #ifndef CHKDSK_BPB_H
 #define CHKDSK_BPB_H
 
-#include "vol.h"    /* for LBA_t */
+#include "vol.h"
 
-/* Run the Phase 1 validation against the volume whose VBR sits at
- * `volbase`. Prints one line per finding to stdout. Returns the number
- * of issues found (0 = clean). */
-int bpb_check(LBA_t volbase);
+/* Run the Phase 1 diagnostic against a volume whose state has already
+ * been populated by vol_mount. `mount_rc` is the value returned by
+ * vol_mount; if non-zero, bpb_check prints the specific reason mount
+ * was refused. On success, prints Type/clusters and runs the FAT32
+ * FSInfo + backup-VBR cross-checks. Returns the number of issues
+ * found (0 = clean). */
+int bpb_check(vol_t *fs, int mount_rc);
 
 #endif /* CHKDSK_BPB_H */

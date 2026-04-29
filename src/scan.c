@@ -25,12 +25,13 @@
 #include <sprinter.h>
 #include "vol.h"
 #include "bitmap.h"
+#include "chain.h"
 #include "dirwalk.h"
 #include "dirent.h"
 #include "prt.h"
 #include "scan.h"
 
-#define SCAN_MAX_DEPTH   8u
+#define SCAN_MAX_DEPTH  10u
 
 #define ATTR_VOLID 0x08u
 #define ATTR_DIR   0x10u
@@ -48,9 +49,30 @@ typedef struct {
     DWORD entries;
     DWORD dirs;
     DWORD flagged;
-    DWORD cycles;
+    DWORD cycles;        /* first-cluster cross-link (cycle / dup ref) */
+    DWORD cross_links;   /* mid-chain cross-links (clusters seen twice) */
+    DWORD broken_chains; /* invalid link or BAD encountered mid-chain */
+    DWORD truncated;     /* file size > chain length */
+    DWORD excess;        /* file size < chain length */
     DWORD depth_capped;
 } scan_totals_t;
+
+/* Chain-walk findings, flag bits returned by walk_chain. */
+#define CW_CYCLE      0x01u   /* first cluster already set in bitmap */
+#define CW_CROSS      0x02u   /* mid-chain cluster already set */
+#define CW_BROKEN     0x04u   /* invalid link encountered */
+#define CW_BAD        0x08u   /* FAT entry == BAD mid-chain */
+#define CW_IO_ERR     0x10u   /* disk_read failure */
+#define CW_TRUNCATED  0x20u   /* file size implies more clusters than chain */
+#define CW_EXCESS     0x40u   /* file size implies fewer clusters than chain */
+
+/* LFN sequence/checksum validation -- deferred. Full implementation
+ * blew the static-data ceiling on the current 32 KB (CRT0_PAGE2=0)
+ * layout. The most informative LFN signal (cksum mismatch) is also
+ * the most expensive to add -- it needs a per-slot state machine plus
+ * the 11-byte rotate-add SFN checksum. Leaving this stub so the slot
+ * parsing in dirent_validate (DE_LFN_BAD: type byte / first cluster)
+ * still runs. */
 
 static DWORD entry_first_cluster(const BYTE *e)
 {
@@ -129,6 +151,47 @@ static int is_descendable_dir(const BYTE *e)
     return 1;
 }
 
+/* Walk the FAT chain at `start`, marking visited clusters in the bitmap.
+ * Stops at EOC, BAD, invalid link, I/O error, or test_and_set hit.
+ * Returns CW_* flag bits; chain length is written to *len_out (0 means
+ * "we never marked anything", e.g. cycle on the first cluster).
+ * g_sect_a ends up holding a FAT sector -- callers using a dirwalk must
+ * mark its buffer dirty after returning. */
+static UINT walk_chain(vol_t *fs, DWORD start, DWORD *len_out)
+{
+    DWORD c = start;
+    DWORD next;
+    DWORD len = 0ul;
+    UINT  flags = 0u;
+
+    if (bitmap_test_and_set(c)) { *len_out = 0ul; return CW_CYCLE; }
+    len = 1ul;
+
+    for (;;) {
+        next = chain_get_entry(fs, c);
+        if (next == CHAIN_READ_ERROR)              { flags |= CW_IO_ERR; break; }
+        if (chain_is_bad(fs, next))                { flags |= CW_BAD | CW_BROKEN; break; }
+        if (chain_is_eoc(fs, next))                                                 break;
+        if (next < 2ul || next >= fs->n_fatent)    { flags |= CW_BROKEN; break; }
+        if (bitmap_test_and_set(next))             { flags |= CW_CROSS; break; }
+        len++;
+        c = next;
+    }
+    *len_out = len;
+    return flags;
+}
+
+static void print_cw_tags(UINT cflags)
+{
+    if (cflags & CW_CYCLE)        prt_str(" cycle");
+    else if (cflags & CW_CROSS)   prt_str(" cross-link");
+    if (cflags & CW_BAD)          prt_str(" bad-cluster");
+    else if (cflags & CW_BROKEN)  prt_str(" broken");
+    if (cflags & CW_IO_ERR)       prt_str(" io-err");
+    if (cflags & CW_TRUNCATED)    prt_str(" truncated");
+    if (cflags & CW_EXCESS)       prt_str(" excess");
+}
+
 /* Emit "  /A/B/NAME.EXT" -- the full path of a flagged entry. */
 static void print_flagged(BYTE depth, const BYTE *e)
 {
@@ -146,17 +209,28 @@ static void print_flagged(BYTE depth, const BYTE *e)
 /* Process one entry of the dir at top-of-stack. Returns:
  *   1 -- continued, stay on same frame
  *   0 -- popped (frame finished)
- *  -1 -- I/O error (bubble up) */
+ *  -1 -- I/O error (bubble up)
+ *
+ * IMPORTANT: dirwalk_next returns a pointer INTO g_sect_a. walk_chain
+ * uses g_sect_a as its FAT-sector cache, so it clobbers that pointer.
+ * We snapshot the 32-byte entry into a local buffer before doing any
+ * I/O that touches g_sect_a, and operate on the snapshot afterwards. */
 static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
 {
     scan_frame_t *frame;
-    BYTE         *e;
+    BYTE         *src;
+    BYTE          ent[32];
     int           rc;
-    UINT          flags;
+    UINT          i;
+    UINT          dflags;
+    UINT          cflags;
     DWORD         clust;
+    DWORD         size;
+    DWORD         chain_len;
+    int           is_file;
 
     frame = &g_frames[*depth];
-    rc = dirwalk_next(&frame->walker, &e);
+    rc = dirwalk_next(&frame->walker, &src);
     if (rc <  0) return -1;
     if (rc == 0) {
         if (*depth > 0u) {
@@ -168,55 +242,82 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         return 0;
     }
 
-    /* Skip "." and ".." silently. Their cluster pointers are validated
-     * by Stage 3.5, not here. */
-    if ((e[11] & 0x3Fu) != ATTR_LFN && e[0] != 0xE5u && is_dot_entry(e)) {
+    for (i = 0u; i < 32u; i++) ent[i] = src[i];
+
+    /* "." and ".." -- skipped silently. */
+    if ((ent[11] & 0x3Fu) != ATTR_LFN && ent[0] != 0xE5u && is_dot_entry(ent)) {
         return 1;
     }
 
     t->entries++;
-    flags = dirent_validate(fs, e);
-    if (flags & DE_ANY_ERROR) {
-        t->flagged++;
-        print_flagged(*depth, e);
-        prt_str(" *");
-        dirent_flags_print(flags);
-        prt_nl();
+    dflags    = dirent_validate(fs, ent);
+    cflags    = 0u;
+    chain_len = 0ul;
+
+    clust   = entry_first_cluster(ent);
+    is_file = ((ent[11] & 0x3Fu) != ATTR_LFN) && !(ent[11] & ATTR_DIR)
+            && !(ent[11] & ATTR_VOLID) && (ent[0] != 0xE5u);
+    size    = ((DWORD)ent[31] << 24) | ((DWORD)ent[30] << 16)
+            | ((DWORD)ent[29] << 8)  | (DWORD)ent[28];
+
+    if (ent[0] != 0xE5u && clust >= 2ul && clust < fs->n_fatent) {
+        cflags |= walk_chain(fs, clust, &chain_len);
+        dirwalk_buffer_dirty(&g_frames[*depth].walker);
+
+        if (is_file && size != 0ul
+            && (cflags & (CW_BROKEN | CW_BAD | CW_IO_ERR | CW_CYCLE | CW_CROSS)) == 0u) {
+            DWORD cluster_bytes = (DWORD)fs->csize << 9;
+            DWORD expected      = (size + cluster_bytes - 1ul) / cluster_bytes;
+            if (chain_len < expected)      cflags |= CW_TRUNCATED;
+            else if (chain_len > expected) cflags |= CW_EXCESS;
+        }
     }
 
-    if (!is_descendable_dir(e)) return 1;
-
-    clust = entry_first_cluster(e);
-    if (clust < 2ul || clust >= fs->n_fatent) return 1; /* DE_CLUST_OOR */
-
-    if (bitmap_test_and_set(clust)) {
-        prt_str("  cycle/cross-link at cluster 0x");
-        prt_hex((unsigned long)clust, 8u);
-        prt_str("  ");
-        print_path(*depth);
-        print_sfn(e);
-        prt_nl();
-        t->cycles++;
-        return 1;
+    {
+        UINT de_err = dflags & DE_ANY_ERROR;
+        if (de_err || cflags) {
+            print_flagged(*depth, ent);
+            prt_str(" *");
+            if (de_err) dirent_flags_print(dflags);
+            if (cflags) print_cw_tags(cflags);
+            prt_nl();
+            if (de_err) t->flagged++;
+        }
     }
+
+    if (cflags & CW_CYCLE)     t->cycles++;
+    if (cflags & CW_CROSS)     t->cross_links++;
+    if (cflags & CW_BROKEN)    t->broken_chains++;
+    if (cflags & CW_TRUNCATED) t->truncated++;
+    if (cflags & CW_EXCESS)    t->excess++;
+
+    if (!is_descendable_dir(ent)) return 1;
+    if (clust < 2ul || clust >= fs->n_fatent) return 1;
+    if (cflags & (CW_CYCLE | CW_IO_ERR)) return 1;
 
     if (*depth >= SCAN_MAX_DEPTH) {
         prt_str("  depth-limit ");
         print_path(*depth);
-        print_sfn(e);
+        print_sfn(ent);
         prt_nl();
         t->depth_capped++;
         return 1;
     }
 
-    /* Descend. */
     (*depth)++;
     t->dirs++;
-    copy_name(g_frames[*depth].name, e);
+    copy_name(g_frames[*depth].name, ent);
     dirwalk_open_chain(&g_frames[*depth].walker, fs, clust);
-    /* parent frame's g_sect_a is gone -- mark it. */
     dirwalk_buffer_dirty(&g_frames[*depth - 1u].walker);
     return 1;
+}
+
+/* Print " label=N" only if N != 0. Compresses the totals line output. */
+static void emit_count(const char *label, DWORD val)
+{
+    if (val == 0ul) return;
+    prt_str(label);
+    prt_dec((unsigned long)val);
 }
 
 static int walk_tree(vol_t *fs, scan_totals_t *t)
@@ -224,11 +325,15 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
     BYTE depth;
     int  rc;
 
-    t->entries      = 0ul;
-    t->dirs         = 0ul;
-    t->flagged      = 0ul;
-    t->cycles       = 0ul;
-    t->depth_capped = 0ul;
+    t->entries       = 0ul;
+    t->dirs          = 0ul;
+    t->flagged       = 0ul;
+    t->cycles        = 0ul;
+    t->cross_links   = 0ul;
+    t->broken_chains = 0ul;
+    t->truncated     = 0ul;
+    t->excess        = 0ul;
+    t->depth_capped  = 0ul;
 
     depth = 0u;
     dirwalk_open_root(&g_frames[0].walker, fs);
@@ -257,9 +362,7 @@ int scan_run(vol_t *fs)
     bitmap_set(1u);
 
     if (walk_tree(fs, &t) < 0) {
-        prt_str("  error: walk aborted (bios=");
-        prt_dec((unsigned long)0u);
-        prt_str(")\r\n");
+        prt_str("  error: walk aborted\r\n");
         bitmap_release();
         return -1;
     }
@@ -268,20 +371,16 @@ int scan_run(vol_t *fs)
     prt_dec((unsigned long)t.entries);
     prt_str(" dirs=");
     prt_dec((unsigned long)t.dirs);
-    if (t.flagged) {
-        prt_str(" flagged=");
-        prt_dec((unsigned long)t.flagged);
-    }
-    if (t.cycles) {
-        prt_str(" cycles=");
-        prt_dec((unsigned long)t.cycles);
-    }
-    if (t.depth_capped) {
-        prt_str(" depth-capped=");
-        prt_dec((unsigned long)t.depth_capped);
-    }
+    emit_count(" flagged=",     t.flagged);
+    emit_count(" cycles=",      t.cycles);
+    emit_count(" crosslinks=",  t.cross_links);
+    emit_count(" broken=",      t.broken_chains);
+    emit_count(" truncated=",   t.truncated);
+    emit_count(" excess=",      t.excess);
+    emit_count(" depth-cap=",   t.depth_capped);
     prt_nl();
 
     bitmap_release();
-    return (int)(t.flagged + t.cycles);
+    return (int)(t.flagged + t.cycles + t.cross_links + t.broken_chains
+               + t.truncated + t.excess);
 }

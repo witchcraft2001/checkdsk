@@ -6,8 +6,8 @@
 #ifndef CHKDSK_CMDLINE_H
 #define CHKDSK_CMDLINE_H
 
-#define CHKDSK_MAX_CMDLINE  128
-#define CHKDSK_MAX_ARGV     8
+#define CHKDSK_MAX_CMDLINE  48
+#define CHKDSK_MAX_ARGV     4
 
 /* Read DSS command line into `out` (max out_sz - 1 chars) with ASCII
  * validation. On any non-printable byte the result is empty. */
