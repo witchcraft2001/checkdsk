@@ -1,6 +1,6 @@
 APP        = chkdsk
 VPATH      = src
-SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c mount.c summary.c bpb.c fat.c chain.c bitmap.c dirwalk.c scan.c
+SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c mount.c summary.c bpb.c fat.c chain.c bitmap.c dirwalk.c dirent.c scan.c
 SDK_DIR   ?= ../sdcc-sprinter-sdk/
 CRT0_PAGE2 ?= 0
 # Code+data occupy WIN1+WIN2 (~32 KB), stack at 0xBFFF. Bitmap pages

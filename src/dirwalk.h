@@ -30,6 +30,7 @@ typedef struct {
     WORD   sect_off;         /* byte offset within g_sect_a (0..512) */
     WORD   cluster_sects_left; /* sectors remaining in current cluster */
     BYTE   end_seen;         /* 1 once 0x00 marker observed */
+    BYTE   buffer_dirty;     /* 1 if g_sect_a was clobbered by other code */
 } dirwalk_t;
 
 /* Open the root directory. Always returns 0 (no I/O yet). */
@@ -46,5 +47,11 @@ int  dirwalk_open_chain(dirwalk_t *w, vol_t *fs, DWORD start_cluster);
  *  -1 -- I/O or chain error. Inspect diskio_dss_last_error() for context.
  */
 int  dirwalk_next(dirwalk_t *w, BYTE **out_entry);
+
+/* Tell the walker that g_sect_a was overwritten by external code (e.g.
+ * after recursing into a sub-directory). The walker re-reads its current
+ * sector on the next dirwalk_next call so the iteration resumes at the
+ * exact same offset. No-op if the walker is at a sector boundary. */
+void dirwalk_buffer_dirty(dirwalk_t *w);
 
 #endif /* CHKDSK_DIRWALK_H */

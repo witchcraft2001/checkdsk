@@ -15,9 +15,10 @@
 
 int dirwalk_open_root(dirwalk_t *w, vol_t *fs)
 {
-    w->fs       = fs;
-    w->end_seen = 0u;
-    w->sect_off = SECTOR_SIZE;     /* trigger first sector load on next() */
+    w->fs           = fs;
+    w->end_seen     = 0u;
+    w->buffer_dirty = 0u;
+    w->sect_off     = SECTOR_SIZE;     /* trigger first sector load on next() */
 
     if (fs->fs_type == FS_FAT32) {
         w->cluster            = (DWORD)fs->dirbase;
@@ -37,12 +38,18 @@ int dirwalk_open_chain(dirwalk_t *w, vol_t *fs, DWORD start_cluster)
 {
     w->fs                 = fs;
     w->end_seen           = 0u;
+    w->buffer_dirty       = 0u;
     w->sect_off           = SECTOR_SIZE;
     w->cluster            = start_cluster;
     w->cur_sect           = chain_cluster_to_lba(fs, start_cluster);
     w->cluster_sects_left = fs->csize;
     w->entries_left       = 0xFFFFFFFFul;
     return 0;
+}
+
+void dirwalk_buffer_dirty(dirwalk_t *w)
+{
+    w->buffer_dirty = 1u;
 }
 
 /* Load the sector at w->cur_sect into g_sect_a, advance bookkeeping.
@@ -82,6 +89,18 @@ int dirwalk_next(dirwalk_t *w, BYTE **out_entry)
     int rc;
 
     if (w->end_seen) return 0;
+
+    /* External code (e.g. a sub-directory walker) clobbered g_sect_a;
+     * re-load the sector we were partway through so iteration resumes
+     * at the exact byte offset. No-op if we're at a sector boundary. */
+    if (w->buffer_dirty && w->sect_off > 0u && w->sect_off < SECTOR_SIZE) {
+        if (disk_read(0u, g_sect_a, w->cur_sect - 1u, 1u) != RES_OK) {
+            w->end_seen = 1u;
+            return -1;
+        }
+        chain_invalidate();
+    }
+    w->buffer_dirty = 0u;
 
     while (w->entries_left > 0ul) {
         if (w->sect_off >= SECTOR_SIZE) {
