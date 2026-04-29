@@ -18,8 +18,7 @@
 #ifndef CHKDSK_BPB_H
 #define CHKDSK_BPB_H
 
-#include <sprinter/types.h>
-#include "ff.h"     /* for LBA_t */
+#include "vol.h"    /* for LBA_t */
 
 /* Run the Phase 1 validation against the volume whose VBR sits at
  * `volbase`. Prints one line per finding to stdout. Returns the number

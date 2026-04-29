@@ -17,10 +17,10 @@
 #ifndef CHKDSK_SCAN_H
 #define CHKDSK_SCAN_H
 
-#include "ff.h"
+#include "vol.h"
 
 /* Returns the number of issues found (0 = clean). Negative on a
  * fatal error like out-of-memory for the bitmap. */
-int scan_run(FATFS *fs);
+int scan_run(vol_t *fs);
 
 #endif /* CHKDSK_SCAN_H */

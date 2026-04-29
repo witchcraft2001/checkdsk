@@ -28,11 +28,11 @@
  */
 
 #include <sprinter.h>
-#include "ff.h"
+#include "vol.h"
 #include "diskio.h"
 #include "diskio_dss.h"
 
-/* Selected by volume.c before f_mount. Default 0xFF means uninitialised. */
+/* Set by volume_apply() before vol_mount. Default 0xFF means uninitialised. */
 static u8  g_dev_disk    = 0xFFu;
 static u16 g_dev_desc    = 0u;
 static u32 g_part_offset = 0ul;

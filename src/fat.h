@@ -14,10 +14,10 @@
 #ifndef CHKDSK_FAT_H
 #define CHKDSK_FAT_H
 
-#include "ff.h"
+#include "vol.h"
 
 /* Returns the number of issues found (0 = clean). Errors and warnings
  * print to stdout in compact form. */
-int fat_check(FATFS *fs);
+int fat_check(vol_t *fs);
 
 #endif /* CHKDSK_FAT_H */

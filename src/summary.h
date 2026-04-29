@@ -13,10 +13,10 @@
 #ifndef CHKDSK_SUMMARY_H
 #define CHKDSK_SUMMARY_H
 
-#include "ff.h"
+#include "vol.h"
 
 /* Print the summary for a mounted volume. Returns 0 on success,
- * non-zero on FatFs error (the FRESULT is reported in the message). */
-int summary_print(FATFS *fs, char drive_letter);
+ * non-zero on a transient I/O error reported via the message. */
+int summary_print(vol_t *fs, char drive_letter);
 
 #endif /* CHKDSK_SUMMARY_H */

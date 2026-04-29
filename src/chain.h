@@ -28,18 +28,17 @@
 #ifndef CHKDSK_CHAIN_H
 #define CHKDSK_CHAIN_H
 
-#include <sprinter/types.h>
-#include "ff.h"
+#include "vol.h"
 
 #define CHAIN_READ_ERROR 0xFFFFFFFFul
 
 /* FatFs-relative LBA of the first sector of cluster `clust`. Caller
  * must ensure clust >= 2 && clust < fs->n_fatent. */
-LBA_t chain_cluster_to_lba(FATFS *fs, DWORD clust);
+LBA_t chain_cluster_to_lba(vol_t *fs, DWORD clust);
 
 /* Read the FAT entry for `clust`. Always returns a 32-bit value with
  * unused upper bits zeroed. Returns CHAIN_READ_ERROR on disk failure. */
-DWORD chain_get_entry(FATFS *fs, DWORD clust);
+DWORD chain_get_entry(vol_t *fs, DWORD clust);
 
 /* Drop the cached FAT sector. Call after any external disk_read that
  * overwrites g_sect_a. */
@@ -51,7 +50,7 @@ u8    chain_last_error(void);
 /* Classify a value returned by chain_get_entry, taking the FS type
  * into account so FAT12 0xFF7 / FAT16 0xFFF7 / FAT32 0x0FFFFFF7 all
  * read as bad / EOC. clust is the value, not the index. */
-u8 chain_is_bad(FATFS *fs, DWORD val);
-u8 chain_is_eoc(FATFS *fs, DWORD val);
+u8 chain_is_bad(vol_t *fs, DWORD val);
+u8 chain_is_eoc(vol_t *fs, DWORD val);
 
 #endif /* CHKDSK_CHAIN_H */

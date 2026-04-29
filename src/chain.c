@@ -4,7 +4,7 @@
  */
 
 #include <sprinter.h>
-#include "ff.h"
+#include "vol.h"
 #include "diskio.h"
 #include "diskio_dss.h"
 #include "sectbuf.h"
@@ -27,7 +27,7 @@ u8 chain_last_error(void)
     return g_last_err;
 }
 
-LBA_t chain_cluster_to_lba(FATFS *fs, DWORD clust)
+LBA_t chain_cluster_to_lba(vol_t *fs, DWORD clust)
 {
     return (LBA_t)(fs->database + (LBA_t)(clust - 2ul) * (LBA_t)fs->csize);
 }
@@ -45,7 +45,7 @@ static u8 load_fat_sector(LBA_t fat_sect)
     return 1u;
 }
 
-DWORD chain_get_entry(FATFS *fs, DWORD clust)
+DWORD chain_get_entry(vol_t *fs, DWORD clust)
 {
     DWORD fat_byte_off;
     LBA_t fat_sect;
@@ -100,7 +100,7 @@ DWORD chain_get_entry(FATFS *fs, DWORD clust)
     }
 }
 
-u8 chain_is_bad(FATFS *fs, DWORD val)
+u8 chain_is_bad(vol_t *fs, DWORD val)
 {
     switch (fs->fs_type) {
     case FS_FAT12: return val == 0x0FF7ul ? 1u : 0u;
@@ -110,7 +110,7 @@ u8 chain_is_bad(FATFS *fs, DWORD val)
     }
 }
 
-u8 chain_is_eoc(FATFS *fs, DWORD val)
+u8 chain_is_eoc(vol_t *fs, DWORD val)
 {
     switch (fs->fs_type) {
     case FS_FAT12: return val >= 0x0FF8ul     ? 1u : 0u;

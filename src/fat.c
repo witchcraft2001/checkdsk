@@ -8,7 +8,7 @@
  */
 
 #include <sprinter.h>
-#include "ff.h"
+#include "vol.h"
 #include "diskio.h"
 #include "diskio_batch.h"
 #include "fat.h"
@@ -78,9 +78,10 @@ static u8 classify(unsigned long v,
 /* Read media descriptor byte from the BPB (offset 0x15 of VBR).
  * Caller saves the byte; the buffer may be overwritten by subsequent
  * disk reads. */
-static u8 read_media_byte(FATFS *fs)
+static u8 read_media_byte(vol_t *fs)
 {
-    if (disk_read(0, g_fat_a, fs->volbase, 1) != RES_OK) return 0u;
+    (void)fs;
+    if (disk_read(0, g_fat_a, (LBA_t)0u, 1) != RES_OK) return 0u;
     return g_fat_a[0x15];
 }
 
@@ -147,7 +148,7 @@ static void validate_one(cnt_t *c,
  * snapshots a per-sector sum, then re-reads FAT 2 over the same page
  * and compares sums to detect mismatching sectors. On a 1 GB FAT16
  * volume this drops phase 2 from ~25 s to a few seconds. */
-static int check_fat_wide(FATFS *fs, int *errs, cnt_t *c, int is_fat32)
+static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
 {
     LBA_t         fat1 = fs->fatbase;
     LBA_t         fat2 = fat1 + (LBA_t)fs->fsize;
@@ -258,7 +259,7 @@ static u8 fat12_read_byte(unsigned long pos)
     return g_fat_a[off];
 }
 
-static int check_fat12(FATFS *fs, int *errs, cnt_t *c)
+static int check_fat12(vol_t *fs, int *errs, cnt_t *c)
 {
     int           cmp_two = (fs->n_fats == 2u);
     unsigned long max_cluster = (unsigned long)fs->n_fatent - 1ul;
@@ -319,7 +320,7 @@ static int check_fat12(FATFS *fs, int *errs, cnt_t *c)
 
 /* Read FAT[0] and FAT[1] specifically and report. Called after the
  * main walk because the cached sector layout differs by FAT type. */
-static void check_special_entries(FATFS *fs, int *errs)
+static void check_special_entries(vol_t *fs, int *errs)
 {
     DRESULT       drc;
     u8            media_bpb;
@@ -381,7 +382,7 @@ static void check_special_entries(FATFS *fs, int *errs)
     prt_str(", FAT[1] OK\r\n");
 }
 
-int fat_check(FATFS *fs)
+int fat_check(vol_t *fs)
 {
     int   errs = 0;
     cnt_t c;

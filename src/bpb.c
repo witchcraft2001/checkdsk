@@ -1,13 +1,12 @@
 /*
  * bpb.c -- Phase 1 boot-sector / BPB validator.  See bpb.h.
  *
- * Memory: two 512-byte static buffers in BSS (1 KB). Avoids putting
- * extra pressure on the stack and keeps the routine independent of
- * any FATFS scratch buffer that other phases may be using.
+ * Memory: shares the single 512-byte sectbuf (g_sect_a). Phase 1 runs
+ * before mount, so no other module is using the buffer concurrently.
  */
 
 #include <sprinter.h>
-#include "ff.h"
+#include "vol.h"
 #include "diskio.h"
 #include "bpb.h"
 #include "sectbuf.h"

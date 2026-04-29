@@ -42,8 +42,8 @@ typedef struct {
  * still call volume_apply() afterwards to lock in the final selection. */
 int volume_resolve(char letter, volume_t *out);
 
-/* Configure the FatFs glue layer and VolToPart[0] so a subsequent
- * f_mount(fs, "0:", 1) targets the resolved volume. */
+/* Bind the diskio layer to the resolved device + partition offset so
+ * subsequent disk_read / vol_mount calls target this volume. */
 void volume_apply(const volume_t *vol);
 
 #endif /* CHKDSK_VOLUME_H */

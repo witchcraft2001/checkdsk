@@ -5,7 +5,7 @@
 
 #include <sprinter.h>
 #include <sprinter/ports.h>
-#include "ff.h"
+#include "vol.h"
 #include "diskio.h"
 #include "diskio_dss.h"
 #include "diskio_batch.h"

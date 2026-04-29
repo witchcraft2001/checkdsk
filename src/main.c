@@ -9,10 +9,8 @@
  *   - return non-zero if either phase reported errors
  */
 
-#include <string.h>
 #include <sprinter.h>
-#include "ff.h"
-#include "diskio.h"
+#include "vol.h"
 #include "cmdline.h"
 #include "diskio_dss.h"
 #include "volume.h"
@@ -42,15 +40,12 @@ static void print_usage(void)
 static u8 dispatch(char letter)
 {
     volume_t vol;
-    FATFS    fs;
-    FRESULT  rc;
+    vol_t    fs;
+    int      mrc;
     int      vrc;
     int      total_errs;
-    int      mount_ok;
-    char     path[3];
 
     total_errs = 0;
-    mount_ok   = 0;
 
     vrc = volume_resolve(letter, &vol);
     if (vrc == VOL_ERR_BAD_LETTER) {
@@ -73,37 +68,25 @@ static u8 dispatch(char letter)
      * offset shifts sector 0 to the partition's VBR. */
     total_errs += bpb_check((LBA_t)0u);
 
-    /* FatFs mount (FF_MULTI_PARTITION = 0; partition offset is set in
-     * diskio so FatFs sees the partition as a whole disk). */
-    path[0] = '0';
-    path[1] = ':';
-    path[2] = '\0';
-
-    memset(&fs, 0, sizeof(fs));
-    rc = f_mount(&fs, path, 1);
-    if (rc == FR_OK) {
-        mount_ok = 1;
+    mrc = vol_mount(&fs, 0u);
+    if (mrc == VOL_OK) {
         if (summary_print(&fs, letter) != 0) {
-            f_unmount(path);
+            vol_unmount(&fs);
             return 1u;
         }
-        /* Phase 2: FAT tables. */
         total_errs += fat_check(&fs);
-
-        /* Phase 3: directory walk + cluster bitmap. */
         {
             int srv = scan_run(&fs);
             if (srv > 0) total_errs += srv;
         }
+        vol_unmount(&fs);
     } else {
-        prt_str("checkdsk: f_mount rc=");
-        prt_dec((unsigned long)rc);
+        prt_str("checkdsk: vol_mount rc=");
+        prt_dec((unsigned long)mrc);
         prt_str(" err=");
         prt_dec((unsigned long)diskio_dss_last_error());
         prt_str(" (summary skipped)\r\n");
     }
-
-    if (mount_ok) f_unmount(path);
 
     return total_errs > 0 ? 1u : 0u;
 }

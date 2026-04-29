@@ -8,13 +8,13 @@
  */
 
 #include <sprinter.h>
-#include "ff.h"
+#include "vol.h"
 #include "bitmap.h"
 #include "chain.h"
 #include "prt.h"
 #include "scan.h"
 
-int scan_run(FATFS *fs)
+int scan_run(vol_t *fs)
 {
     DWORD probe;
 

@@ -3,7 +3,7 @@
  * algorithm and side-effect contract.
  */
 
-#include "ff.h"
+#include "vol.h"
 #include "diskio.h"
 #include "volume.h"
 #include "diskio_dss.h"
