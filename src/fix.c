@@ -13,25 +13,11 @@ static u8    g_fix_enabled = 0u;
 static DWORD g_fix_found   = 0ul;
 static DWORD g_fix_applied = 0ul;
 
-void fix_enable(void)
-{
-    g_fix_enabled = 1u;
-}
-
-int fix_enabled(void)
-{
-    return g_fix_enabled ? 1 : 0;
-}
-
-void fix_count_found(void)
-{
-    g_fix_found++;
-}
-
-int fix_any_found(void)
-{
-    return (g_fix_found != 0ul) ? 1 : 0;
-}
+void fix_enable(void)        { g_fix_enabled = 1u; }
+int  fix_enabled(void)       { return g_fix_enabled ? 1 : 0; }
+void fix_count_found(void)   { g_fix_found++; }
+void fix_count_applied(void) { g_fix_applied++; }
+int  fix_any_found(void)     { return (g_fix_found != 0ul) ? 1 : 0; }
 
 int fix_write(LBA_t lba, const BYTE *buf, UINT count)
 {
@@ -39,29 +25,27 @@ int fix_write(LBA_t lba, const BYTE *buf, UINT count)
     return (disk_write(0u, buf, lba, count) == RES_OK) ? 1 : 0;
 }
 
-void fix_count_applied(void)
-{
-    g_fix_applied++;
-}
-
-int fix_dir_size_zero(LBA_t sect, WORD off)
+int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
 {
     if (!g_fix_enabled) return 1;
     if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
-    g_sect_a[off + 28u] = 0u;
-    g_sect_a[off + 29u] = 0u;
-    g_sect_a[off + 30u] = 0u;
-    g_sect_a[off + 31u] = 0u;
-    if (!fix_write(sect, g_sect_a, 1u)) return 0;
-    fix_count_applied();
-    return 1;
-}
-
-int fix_entry_delete(LBA_t sect, WORD off)
-{
-    if (!g_fix_enabled) return 1;
-    if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
-    g_sect_a[off] = 0xE5u;
+    switch (kind) {
+    case FIX_DPATCH_DELETE:
+        g_sect_a[off] = 0xE5u;
+        break;
+    case FIX_DPATCH_DOT_CLUST:
+        g_sect_a[off + 20u] = (BYTE)((value >> 16) & 0xFFu);
+        g_sect_a[off + 21u] = (BYTE)((value >> 24) & 0xFFu);
+        g_sect_a[off + 26u] = (BYTE)(value & 0xFFu);
+        g_sect_a[off + 27u] = (BYTE)((value >> 8) & 0xFFu);
+        break;
+    default: /* FIX_DPATCH_SIZE */
+        g_sect_a[off + 28u] = (BYTE)(value & 0xFFu);
+        g_sect_a[off + 29u] = (BYTE)((value >> 8) & 0xFFu);
+        g_sect_a[off + 30u] = (BYTE)((value >> 16) & 0xFFu);
+        g_sect_a[off + 31u] = (BYTE)((value >> 24) & 0xFFu);
+        break;
+    }
     if (!fix_write(sect, g_sect_a, 1u)) return 0;
     fix_count_applied();
     return 1;

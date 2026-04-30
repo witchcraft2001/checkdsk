@@ -43,6 +43,7 @@
 typedef struct {
     dirwalk_t walker;
     BYTE      name[11];      /* parent SFN, valid for depth >= 1 */
+    DWORD     start_cluster; /* first cluster of this directory (0 for FAT12/16 root) */
 } scan_frame_t;
 
 static scan_frame_t g_frames[SCAN_MAX_DEPTH + 1u];
@@ -272,9 +273,50 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
 
     for (i = 0u; i < 32u; i++) ent[i] = src[i];
 
-    /* "." and ".." -- skipped silently. */
-    if ((ent[11] & 0x3Fu) != ATTR_LFN && ent[0] != 0xE5u && is_dot_entry(ent)) {
-        return 1;
+    /* Stage 4.3: validate "." / ".." cluster pointers, then continue
+     * iteration without counting them as regular entries.
+     *   "."  must point at the directory's own first cluster
+     *   ".." must point at the parent's first cluster, or 0 when the
+     *        parent is the root (per FAT spec, regardless of FAT type).
+     * Only applies inside a subdirectory (depth >= 1) -- the root is
+     * walked via dirwalk_open_root and contains no dot entries. */
+    if ((ent[11] & 0x3Fu) != ATTR_LFN && ent[0] != 0xE5u) {
+        int dot_kind = is_dot_entry(ent);
+        if (dot_kind != 0) {
+            if (*depth >= 1u) {
+                DWORD got_clust = entry_first_cluster(ent);
+                DWORD expected;
+                if (dot_kind == 1) {
+                    expected = frame->start_cluster;
+                } else {
+                    expected = (*depth == 1u)
+                               ? 0ul
+                               : g_frames[*depth - 1u].start_cluster;
+                }
+                if (got_clust != expected) {
+                    prt_str("  ");
+                    print_path(*depth);
+                    prt_str((dot_kind == 1) ? "." : "..");
+                    prt_str(" * dot-clust got=");
+                    prt_dec((unsigned long)got_clust);
+                    prt_str(" expect=");
+                    prt_dec((unsigned long)expected);
+                    prt_nl();
+                    t->flagged++;
+                    fix_count_found();
+                    if (fix_enabled()) {
+                        LBA_t sect; WORD off;
+                        dirwalk_last_entry_location(&frame->walker, &sect, &off);
+                        if (fix_dir_patch(sect, off, FIX_DPATCH_DOT_CLUST, expected)) {
+                            dirwalk_buffer_dirty(&frame->walker);
+                        } else {
+                            prt_str("  WARN: dot-clust repair failed\r\n");
+                        }
+                    }
+                }
+            }
+            return 1;
+        }
     }
 
     t->entries++;
@@ -339,8 +381,9 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             LBA_t sect; WORD off;
             int   ok;
             dirwalk_last_entry_location(&frame->walker, &sect, &off);
-            ok = (has_dot == 1) ? fix_dir_size_zero(sect, off)
-                                : fix_entry_delete(sect, off);
+            ok = (has_dot == 1)
+                 ? fix_dir_patch(sect, off, FIX_DPATCH_SIZE, 0ul)
+                 : fix_dir_patch(sect, off, FIX_DPATCH_DELETE, 0ul);
             if (ok) {
                 if (fix_enabled()) {
                     /* Sector reload clobbered g_sect_a -- walker stale. */
@@ -357,6 +400,28 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     if (cflags & CW_BROKEN)    { t->broken_chains++;  fix_count_found(); }
     if (cflags & CW_TRUNCATED) { t->truncated++;      fix_count_found(); }
     if (cflags & CW_EXCESS)    { t->excess++;         fix_count_found(); }
+
+    /* Stage 4.4: shrink the file's size DWORD to match the actual chain
+     * coverage when the chain was cut short or hit garbage. Covers
+     * TRUNCATED (clean EOC earlier than expected), BROKEN/BAD (hard
+     * error mid-chain), and CROSS (chain ran into territory already
+     * claimed by another file). EXCESS is not repaired here -- that
+     * needs a FAT-side write to truncate the chain itself, deferred
+     * to Stage 4.6 territory. */
+    if (is_file && size != 0ul && chain_len != 0ul
+        && (cflags & (CW_BROKEN | CW_BAD | CW_TRUNCATED | CW_CROSS)) != 0u) {
+        DWORD cluster_bytes  = (DWORD)fs->csize << 9;
+        DWORD chain_capacity = chain_len * cluster_bytes;
+        if (size > chain_capacity) {
+            LBA_t sect; WORD off;
+            dirwalk_last_entry_location(&frame->walker, &sect, &off);
+            if (fix_dir_patch(sect, off, FIX_DPATCH_SIZE, chain_capacity)) {
+                if (fix_enabled()) dirwalk_buffer_dirty(&frame->walker);
+            } else {
+                prt_str("  WARN: chain-size repair failed\r\n");
+            }
+        }
+    }
 
     if (!is_descendable_dir(ent, dflags)) return 1;
     if (clust < 2ul || clust >= fs->n_fatent) return 1;
@@ -375,6 +440,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     (*depth)++;
     t->dirs++;
     copy_name(g_frames[*depth].name, ent);
+    g_frames[*depth].start_cluster = clust;
     dirwalk_open_chain(&g_frames[*depth].walker, fs, clust);
     dirwalk_buffer_dirty(&g_frames[*depth - 1u].walker);
     return 1;
@@ -404,6 +470,12 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
     t->depth_capped  = 0ul;
 
     depth = 0u;
+    /* Root frame: start_cluster only used by dot validation, which is
+     * gated on depth >= 1. Set to fs->dirbase on FAT32 (the actual
+     * root cluster) and 0 on FAT12/16 for self-consistency, even
+     * though no dots will be checked here. */
+    g_frames[0].start_cluster =
+        (fs->fs_type == FS_FAT32) ? (DWORD)fs->dirbase : 0ul;
     dirwalk_open_root(&g_frames[0].walker, fs);
 
     for (;;) {
