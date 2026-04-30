@@ -86,9 +86,12 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
 
     if (attr & 0xC0u) flags |= DE_ATTR_RESERVED;
 
-    hi_clust    = ld_word_le(&e[20]);
-    first_clust = ((DWORD)hi_clust << 16) | (DWORD)ld_word_le(&e[26]);
-    size        = ld_dword_le(&e[28]);
+    {
+        BYTE *fc = (BYTE *)&first_clust;
+        fc[0] = e[26]; fc[1] = e[27]; fc[2] = e[20]; fc[3] = e[21];
+    }
+    hi_clust = ld_word_le(&e[20]);
+    size     = ld_dword_le(&e[28]);
 
     if (attr & ATTR_VOLID) {
         if (first_clust != 0ul) flags |= DE_VOL_NONZERO;

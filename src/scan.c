@@ -412,9 +412,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
      * coverage when the chain was cut short or hit garbage. Covers
      * TRUNCATED (clean EOC earlier than expected), BROKEN/BAD (hard
      * error mid-chain), and CROSS (chain ran into territory already
-     * claimed by another file). EXCESS is not repaired here -- that
-     * needs a FAT-side write to truncate the chain itself, deferred
-     * to Stage 4.6 territory. */
+     * claimed by another file). */
     if (is_file && size != 0ul && chain_len != 0ul
         && (cflags & (CW_BROKEN | CW_BAD | CW_TRUNCATED | CW_CROSS)) != 0u) {
         DWORD cluster_bytes  = (DWORD)fs->csize << 9;
@@ -429,6 +427,8 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             }
         }
     }
+
+
 
     if (!is_descendable_dir(ent, dflags)) return 1;
     if (clust < 2ul || clust >= fs->n_fatent) return 1;

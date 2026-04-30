@@ -43,17 +43,16 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
     DWORD fat_byte_off;
     LBA_t fat_sect;
     u16   in_off;
-    u8    b0, b1;
-#if CHKDSK_FAT32
-    u8    b2, b3;
-#endif
+    DWORD x = 0ul;
+    BYTE *xb = (BYTE *)&x;
 
     if (clust >= fs->n_fatent) return CHAIN_READ_ERROR;
 
     switch (fs->fs_type) {
 #if CHKDSK_FAT12
-    case FS_FAT12:
+    case FS_FAT12: {
         /* 1.5 bytes per entry. Entry may straddle a sector boundary. */
+        u8 b0, b1;
         fat_byte_off = clust + (clust >> 1);
         fat_sect     = (LBA_t)(fs->fatbase + (fat_byte_off >> 9));
         in_off       = (u16)(fat_byte_off & 0x1FFu);
@@ -66,9 +65,14 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
             b1 = g_sect_a[in_off + 1u];
         }
         if (clust & 1ul) {
-            return ((DWORD)b1 << 4) | (DWORD)(b0 >> 4);
+            xb[0] = (BYTE)((b0 >> 4) | (b1 << 4));
+            xb[1] = (BYTE)(b1 >> 4);
+        } else {
+            xb[0] = b0;
+            xb[1] = (BYTE)(b1 & 0x0Fu);
         }
-        return ((DWORD)(b1 & 0x0Fu) << 8) | (DWORD)b0;
+        return x;
+    }
 #endif
 #if CHKDSK_FAT16
     case FS_FAT16:
@@ -76,9 +80,9 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
         fat_sect     = (LBA_t)(fs->fatbase + (fat_byte_off >> 9));
         in_off       = (u16)(fat_byte_off & 0x1FFu);
         if (!load_fat_sector(fat_sect)) return CHAIN_READ_ERROR;
-        b0 = g_sect_a[in_off];
-        b1 = g_sect_a[in_off + 1u];
-        return ((DWORD)b1 << 8) | (DWORD)b0;
+        xb[0] = g_sect_a[in_off];
+        xb[1] = g_sect_a[in_off + 1u];
+        return x;
 #endif
 #if CHKDSK_FAT32
     case FS_FAT32:
@@ -86,11 +90,11 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
         fat_sect     = (LBA_t)(fs->fatbase + (fat_byte_off >> 9));
         in_off       = (u16)(fat_byte_off & 0x1FFu);
         if (!load_fat_sector(fat_sect)) return CHAIN_READ_ERROR;
-        b0 = g_sect_a[in_off];
-        b1 = g_sect_a[in_off + 1u];
-        b2 = g_sect_a[in_off + 2u];
-        b3 = g_sect_a[in_off + 3u] & 0x0Fu;   /* FAT32 entries are 28-bit */
-        return ((DWORD)b3 << 24) | ((DWORD)b2 << 16) | ((DWORD)b1 << 8) | (DWORD)b0;
+        xb[0] = g_sect_a[in_off];
+        xb[1] = g_sect_a[in_off + 1u];
+        xb[2] = g_sect_a[in_off + 2u];
+        xb[3] = g_sect_a[in_off + 3u] & 0x0Fu;   /* 28-bit */
+        return x;
 #endif
     default:
         return CHAIN_READ_ERROR;

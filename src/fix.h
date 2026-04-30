@@ -61,4 +61,5 @@ int  fix_any_found(void);
  * g_sect_a is clobbered on every call. */
 int  fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value);
 
+
 #endif /* CHKDSK_FIX_H */
