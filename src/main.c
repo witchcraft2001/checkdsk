@@ -33,9 +33,11 @@ static void print_banner(void)
 static void print_usage(void)
 {
     print_banner();
-    prt_str("Usage: CHKDSK <drive>: [/F]\r\n");
+    prt_str("Usage: CHKDSK <drive>: [/F] [/C]\r\n");
     prt_str("  <drive>:  A, B (floppies) or C, D, ... (IDE partitions)\r\n");
     prt_str("  /F        apply repairs (default: report only)\r\n");
+    prt_str("  /C        with /F: convert lost chains to FILE####.CHK\r\n");
+    prt_str("            (default: free lost clusters silently)\r\n");
     prt_str("  /?        this help\r\n");
 }
 
@@ -131,6 +133,10 @@ void main(void)
         }
         if (cmd_strieq(g_argv[i], "/F") || cmd_strieq(g_argv[i], "/FIX")) {
             fix_enable();
+            continue;
+        }
+        if (cmd_strieq(g_argv[i], "/C") || cmd_strieq(g_argv[i], "/CONVERT")) {
+            fix_enable_convert();
             continue;
         }
         if (drive_arg != (char *)0) {

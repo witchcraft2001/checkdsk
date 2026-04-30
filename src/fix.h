@@ -23,6 +23,14 @@
 void fix_enable(void);
 int  fix_enabled(void);
 
+/* Toggled by main.c on `/C` parse. Modifier on /F that changes Phase 4
+ * lost-cluster handling: instead of freeing orphan clusters silently,
+ * convert each orphan chain into a FILE####.CHK entry in the root
+ * directory, preserving the chain for the user to inspect/recover.
+ * Has no effect without /F. */
+void fix_enable_convert(void);
+int  fix_convert_enabled(void);
+
 /* Account for an issue we noticed (called whether or not /F is set). */
 void fix_count_found(void);
 
@@ -52,6 +60,14 @@ int  fix_any_found(void);
 #define FIX_DPATCH_SIZE       0u  /* set size DWORD (off+28..31) to value */
 #define FIX_DPATCH_DELETE     1u  /* mark entry deleted (off byte = 0xE5) */
 #define FIX_DPATCH_DOT_CLUST  2u  /* set FstClus(HI|LO) (off+20..21,26..27) */
+
+/* Stage 4.7: write `value` (next-cluster, EOC, BAD, or 0=free) to the
+ * FAT entry for `clust`. Mirrors into FAT 2 if n_fats == 2. Reads the
+ * FAT sector into g_sect_a, patches the entry in place, writes back.
+ * Does NOT bump the "applied" counter -- callers chain many calls
+ * into one logical repair. Returns 0 on I/O error or if the FAT type
+ * is not 16 / 32. */
+int  fix_fat_set(vol_t *fs, DWORD clust, DWORD value);
 
 /* Patch the 32-byte directory entry at on-disk position (sect, off).
  * Re-reads the sector into g_sect_a, applies the patch, writes it
