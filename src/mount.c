@@ -81,14 +81,26 @@ int vol_mount(vol_t *v, BYTE pdrv)
     count_clust  = data_sectors / (DWORD)spc;
 
     if (count_clust < 4085ul) {
+#if CHKDSK_FAT12
         v->fs_type = FS_FAT12;
         if (n_root == 0u) return VOL_E_BAD_BPB;
+#else
+        return VOL_E_BAD_FAT_TYPE;
+#endif
     } else if (count_clust < 65525ul) {
+#if CHKDSK_FAT16
         v->fs_type = FS_FAT16;
         if (n_root == 0u) return VOL_E_BAD_BPB;
+#else
+        return VOL_E_BAD_FAT_TYPE;
+#endif
     } else {
+#if CHKDSK_FAT32
         v->fs_type = FS_FAT32;
         if (n_root != 0u || fatsz16 != 0u) return VOL_E_BAD_BPB;
+#else
+        return VOL_E_BAD_FAT_TYPE;
+#endif
     }
 
     v->n_fats      = n_fats;

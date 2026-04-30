@@ -8,10 +8,20 @@ CRT0_PAGE2 ?= 0
 VERSION   ?= 0.1.$(shell date +%Y%m%d)
 LOG       ?= 0
 
+# FAT type selection (compile-time). Default: chkdsk.exe handles
+# FAT16+FAT32. Build chkdsk12.exe for floppies as a separate target
+# with CHKDSK_FAT12=1 / FAT16=0 / FAT32=0. At least one must be 1.
+CHKDSK_FAT12 ?= 0
+CHKDSK_FAT16 ?= 1
+CHKDSK_FAT32 ?= 1
+
 include $(SDK_DIR)examples/common.mk
 
 APP_CPPFLAGS += -DCHKDISK_VERSION='"$(VERSION)"' \
-                -DCHKDISK_LOG_ENABLE=$(LOG)
+                -DCHKDISK_LOG_ENABLE=$(LOG) \
+                -DCHKDSK_FAT12=$(CHKDSK_FAT12) \
+                -DCHKDSK_FAT16=$(CHKDSK_FAT16) \
+                -DCHKDSK_FAT32=$(CHKDSK_FAT32)
 
 # Pull z80.lib for SDCC runtime helpers (32-bit divide/mod, etc.) that
 # sprinter.lib does not ship. Set SDCC290_BIN_DIR to the SDCC-2.9.0

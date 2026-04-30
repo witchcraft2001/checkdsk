@@ -43,11 +43,15 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
     DWORD fat_byte_off;
     LBA_t fat_sect;
     u16   in_off;
-    u8    b0, b1, b2, b3;
+    u8    b0, b1;
+#if CHKDSK_FAT32
+    u8    b2, b3;
+#endif
 
     if (clust >= fs->n_fatent) return CHAIN_READ_ERROR;
 
     switch (fs->fs_type) {
+#if CHKDSK_FAT12
     case FS_FAT12:
         /* 1.5 bytes per entry. Entry may straddle a sector boundary. */
         fat_byte_off = clust + (clust >> 1);
@@ -65,7 +69,8 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
             return ((DWORD)b1 << 4) | (DWORD)(b0 >> 4);
         }
         return ((DWORD)(b1 & 0x0Fu) << 8) | (DWORD)b0;
-
+#endif
+#if CHKDSK_FAT16
     case FS_FAT16:
         fat_byte_off = clust << 1;
         fat_sect     = (LBA_t)(fs->fatbase + (fat_byte_off >> 9));
@@ -74,7 +79,8 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
         b0 = g_sect_a[in_off];
         b1 = g_sect_a[in_off + 1u];
         return ((DWORD)b1 << 8) | (DWORD)b0;
-
+#endif
+#if CHKDSK_FAT32
     case FS_FAT32:
         fat_byte_off = clust << 2;
         fat_sect     = (LBA_t)(fs->fatbase + (fat_byte_off >> 9));
@@ -85,7 +91,7 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
         b2 = g_sect_a[in_off + 2u];
         b3 = g_sect_a[in_off + 3u] & 0x0Fu;   /* FAT32 entries are 28-bit */
         return ((DWORD)b3 << 24) | ((DWORD)b2 << 16) | ((DWORD)b1 << 8) | (DWORD)b0;
-
+#endif
     default:
         return CHAIN_READ_ERROR;
     }
@@ -94,9 +100,15 @@ DWORD chain_get_entry(vol_t *fs, DWORD clust)
 u8 chain_is_bad(vol_t *fs, DWORD val)
 {
     switch (fs->fs_type) {
+#if CHKDSK_FAT12
     case FS_FAT12: return val == 0x0FF7ul ? 1u : 0u;
+#endif
+#if CHKDSK_FAT16
     case FS_FAT16: return val == 0xFFF7ul ? 1u : 0u;
+#endif
+#if CHKDSK_FAT32
     case FS_FAT32: return val == 0x0FFFFFF7ul ? 1u : 0u;
+#endif
     default:       return 0u;
     }
 }
@@ -104,9 +116,15 @@ u8 chain_is_bad(vol_t *fs, DWORD val)
 u8 chain_is_eoc(vol_t *fs, DWORD val)
 {
     switch (fs->fs_type) {
+#if CHKDSK_FAT12
     case FS_FAT12: return val >= 0x0FF8ul     ? 1u : 0u;
+#endif
+#if CHKDSK_FAT16
     case FS_FAT16: return val >= 0xFFF8ul     ? 1u : 0u;
+#endif
+#if CHKDSK_FAT32
     case FS_FAT32: return val >= 0x0FFFFFF8ul ? 1u : 0u;
+#endif
     default:       return 1u;
     }
 }

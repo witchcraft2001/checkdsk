@@ -142,6 +142,7 @@ static void validate_one(cnt_t *c,
     }
 }
 
+#if CHKDSK_FAT16 || CHKDSK_FAT32
 /* FAT16/FAT32 unified path. Reads in 32-sector batches via
  * diskio_batch (one BIOS DRV_READ call per batch). Walks all entries
  * within the batch from the mapped DSS page (WIN3); for n_fats == 2,
@@ -234,7 +235,9 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
     }
     return 0;
 }
+#endif /* CHKDSK_FAT16 || CHKDSK_FAT32 */
 
+#if CHKDSK_FAT12
 /* FAT12 path. 12-bit entries, 2 per 3 bytes, may straddle the 512-byte
  * sector boundary -- we use a one-sector cache. Two passes:
  *   1. validate FAT 1 entries via the cached walker.
@@ -317,6 +320,7 @@ static int check_fat12(vol_t *fs, int *errs, cnt_t *c)
     }
     return 0;
 }
+#endif /* CHKDSK_FAT12 */
 
 /* Read FAT[0] and FAT[1] specifically and report. Called after the
  * main walk because the cached sector layout differs by FAT type. */
@@ -337,6 +341,7 @@ static void check_special_entries(vol_t *fs, int *errs)
         return;
     }
 
+#if CHKDSK_FAT12
     if (fs->fs_type == FS_FAT12) {
         e0 = (unsigned long)g_fat_a[0]
            | (((unsigned long)g_fat_a[1] & 0x0Ful) << 8);
@@ -348,7 +353,10 @@ static void check_special_entries(vol_t *fs, int *errs)
         if (e1 < EOC12_MIN) {
             fat_err("FAT[1] not an EOC value", errs);
         }
-    } else if (fs->fs_type == FS_FAT16) {
+    } else
+#endif
+#if CHKDSK_FAT16
+    if (fs->fs_type == FS_FAT16) {
         e0 = (unsigned long)g_fat_a[0]
            | ((unsigned long)g_fat_a[1] << 8);
         e1 = (unsigned long)g_fat_a[2]
@@ -363,7 +371,10 @@ static void check_special_entries(vol_t *fs, int *errs)
          * (1 = OK, 0 = problem). */
         if ((e1 & 0x8000ul) == 0ul) fat_warn("FAT[1] clean-shutdown bit clear (volume dirty)");
         if ((e1 & 0x4000ul) == 0ul) fat_warn("FAT[1] hard-error bit clear");
-    } else {
+    } else
+#endif
+#if CHKDSK_FAT32
+    if (fs->fs_type == FS_FAT32) {
         e0 = ld_dword(&g_fat_a[0]) & 0x0FFFFFFFul;
         e1 = ld_dword(&g_fat_a[4]) & 0x0FFFFFFFul;
         if ((e0 & 0xFFul) != (unsigned long)media_bpb) {
@@ -375,6 +386,11 @@ static void check_special_entries(vol_t *fs, int *errs)
         /* FAT32 FAT[1]: bit 27 = clean shutdown, bit 26 = hard-error. */
         if ((e1 & 0x08000000ul) == 0ul) fat_warn("FAT[1] clean-shutdown bit clear (volume dirty)");
         if ((e1 & 0x04000000ul) == 0ul) fat_warn("FAT[1] hard-error bit clear");
+    } else
+#endif
+    {
+        /* unreachable */
+        (void)e0; (void)e1;
     }
 
     prt_str("  FAT[0] media: 0x");
@@ -391,11 +407,17 @@ int fat_check(vol_t *fs)
 
     cnt_init(&c);
 
+#if CHKDSK_FAT12
     if (fs->fs_type == FS_FAT12) {
         check_fat12(fs, &errs, &c);
-    } else if (fs->fs_type == FS_FAT16 || fs->fs_type == FS_FAT32) {
+    } else
+#endif
+#if CHKDSK_FAT16 || CHKDSK_FAT32
+    if (fs->fs_type == FS_FAT16 || fs->fs_type == FS_FAT32) {
         check_fat_wide(fs, &errs, &c, fs->fs_type == FS_FAT32);
-    } else {
+    } else
+#endif
+    {
         fat_err("unknown FAT type", &errs);
         return errs;
     }

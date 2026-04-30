@@ -66,13 +66,12 @@ typedef struct {
 #define CW_TRUNCATED  0x20u   /* file size implies more clusters than chain */
 #define CW_EXCESS     0x40u   /* file size implies fewer clusters than chain */
 
-/* LFN sequence/checksum validation -- deferred. Full implementation
- * blew the static-data ceiling on the current 32 KB (CRT0_PAGE2=0)
- * layout. The most informative LFN signal (cksum mismatch) is also
- * the most expensive to add -- it needs a per-slot state machine plus
- * the 11-byte rotate-add SFN checksum. Leaving this stub so the slot
- * parsing in dirent_validate (DE_LFN_BAD: type byte / first cluster)
- * still runs. */
+/* Stage 3.6 (LFN sequence + SFN checksum) deferred -- the rotate-add
+ * checksum + per-frame state, even in its minimal form, ate the last
+ * static-data bytes left under the 0xBFFF stack ceiling. Future plan:
+ * shrink fat.c (6.6 KB) and chain.c by sharing FAT12/16/32 dispatch,
+ * which would free the room. dirent_validate keeps the basic per-slot
+ * LFN sanity (DE_LFN_BAD: type byte / first cluster). */
 
 static DWORD entry_first_cluster(const BYTE *e)
 {
