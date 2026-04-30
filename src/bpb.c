@@ -36,10 +36,11 @@ static u16 ld_word(const BYTE *p, UINT off)
 
 static unsigned long ld_dword(const BYTE *p, UINT off)
 {
-    return ((unsigned long)p[off])
-         | ((unsigned long)p[off + 1] << 8)
-         | ((unsigned long)p[off + 2] << 16)
-         | ((unsigned long)p[off + 3] << 24);
+    unsigned long x;
+    BYTE *xb = (BYTE *)&x;
+    xb[0] = p[off];     xb[1] = p[off + 1];
+    xb[2] = p[off + 2]; xb[3] = p[off + 3];
+    return x;
 }
 
 static const char *type_name(BYTE fs_type)

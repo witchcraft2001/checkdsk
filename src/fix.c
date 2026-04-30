@@ -27,6 +27,8 @@ int fix_write(LBA_t lba, const BYTE *buf, UINT count)
 
 int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
 {
+    const BYTE *vb = (const BYTE *)&value;  /* SDCC z80 stores LSB first */
+
     if (!g_fix_enabled) return 1;
     if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
     switch (kind) {
@@ -34,16 +36,16 @@ int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
         g_sect_a[off] = 0xE5u;
         break;
     case FIX_DPATCH_DOT_CLUST:
-        g_sect_a[off + 20u] = (BYTE)((value >> 16) & 0xFFu);
-        g_sect_a[off + 21u] = (BYTE)((value >> 24) & 0xFFu);
-        g_sect_a[off + 26u] = (BYTE)(value & 0xFFu);
-        g_sect_a[off + 27u] = (BYTE)((value >> 8) & 0xFFu);
+        g_sect_a[off + 20u] = vb[2];
+        g_sect_a[off + 21u] = vb[3];
+        g_sect_a[off + 26u] = vb[0];
+        g_sect_a[off + 27u] = vb[1];
         break;
     default: /* FIX_DPATCH_SIZE */
-        g_sect_a[off + 28u] = (BYTE)(value & 0xFFu);
-        g_sect_a[off + 29u] = (BYTE)((value >> 8) & 0xFFu);
-        g_sect_a[off + 30u] = (BYTE)((value >> 16) & 0xFFu);
-        g_sect_a[off + 31u] = (BYTE)((value >> 24) & 0xFFu);
+        g_sect_a[off + 28u] = vb[0];
+        g_sect_a[off + 29u] = vb[1];
+        g_sect_a[off + 30u] = vb[2];
+        g_sect_a[off + 31u] = vb[3];
         break;
     }
     if (!fix_write(sect, g_sect_a, 1u)) return 0;

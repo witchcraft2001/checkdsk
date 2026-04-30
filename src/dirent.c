@@ -42,10 +42,10 @@ static int is_forbidden_sfn_char(BYTE c)
 
 static DWORD ld_dword_le(const BYTE *p)
 {
-    return  (DWORD)p[0]
-         | ((DWORD)p[1] << 8)
-         | ((DWORD)p[2] << 16)
-         | ((DWORD)p[3] << 24);
+    DWORD x;
+    BYTE *xb = (BYTE *)&x;
+    xb[0] = p[0]; xb[1] = p[1]; xb[2] = p[2]; xb[3] = p[3];
+    return x;
 }
 
 static WORD ld_word_le(const BYTE *p)

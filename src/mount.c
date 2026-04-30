@@ -18,11 +18,24 @@
 #include "diskio.h"
 #include "sectbuf.h"
 
-#define LD_W(p, o)  ((WORD)((p)[o]) | ((WORD)((p)[(o) + 1u]) << 8))
-#define LD_D(p, o)  (((DWORD)((p)[o])) \
-                  | ((DWORD)((p)[(o) + 1u]) << 8) \
-                  | ((DWORD)((p)[(o) + 2u]) << 16) \
-                  | ((DWORD)((p)[(o) + 3u]) << 24))
+static WORD ld_w(const BYTE *p)
+{
+    WORD x;
+    BYTE *xb = (BYTE *)&x;
+    xb[0] = p[0]; xb[1] = p[1];
+    return x;
+}
+
+static DWORD ld_d(const BYTE *p)
+{
+    DWORD x;
+    BYTE *xb = (BYTE *)&x;
+    xb[0] = p[0]; xb[1] = p[1]; xb[2] = p[2]; xb[3] = p[3];
+    return x;
+}
+
+#define LD_W(p, o)  ld_w((p) + (o))
+#define LD_D(p, o)  ld_d((p) + (o))
 
 static int is_pow2(WORD v)
 {

@@ -79,9 +79,18 @@ typedef struct {
 
 static DWORD entry_first_cluster(const BYTE *e)
 {
-    DWORD hi = ((DWORD)e[21] << 8) | (DWORD)e[20];
-    DWORD lo = ((DWORD)e[27] << 8) | (DWORD)e[26];
-    return (hi << 16) | lo;
+    DWORD x;
+    BYTE *xb = (BYTE *)&x;
+    xb[0] = e[26]; xb[1] = e[27]; xb[2] = e[20]; xb[3] = e[21];
+    return x;
+}
+
+static DWORD ld_size(const BYTE *e)
+{
+    DWORD x;
+    BYTE *xb = (BYTE *)&x;
+    xb[0] = e[28]; xb[1] = e[29]; xb[2] = e[30]; xb[3] = e[31];
+    return x;
 }
 
 /* 1 = ".", 2 = "..", 0 = neither. */
@@ -154,8 +163,7 @@ static int is_descendable_dir(const BYTE *e, UINT dflags)
     if (!(e[11] & ATTR_DIR))            return 0;
     if (e[11] & ATTR_VOLID)             return 0;
     if (is_dot_entry(e))                return 0;
-    size = ((DWORD)e[31] << 24) | ((DWORD)e[30] << 16)
-         | ((DWORD)e[29] << 8)  | (DWORD)e[28];
+    size = ld_size(e);
     if (size != 0ul)                    return 0;
     if (dflags & DE_ANY_ERROR)          return 0;
     return 1;
@@ -327,8 +335,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     clust   = entry_first_cluster(ent);
     is_file = ((ent[11] & 0x3Fu) != ATTR_LFN) && !(ent[11] & ATTR_DIR)
             && !(ent[11] & ATTR_VOLID) && (ent[0] != 0xE5u);
-    size    = ((DWORD)ent[31] << 24) | ((DWORD)ent[30] << 16)
-            | ((DWORD)ent[29] << 8)  | (DWORD)ent[28];
+    size    = ld_size(ent);
 
     if (ent[0] != 0xE5u && clust >= 2ul && clust < fs->n_fatent) {
         cflags |= walk_chain(fs, clust, &chain_len);
@@ -486,9 +493,104 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
     return 0;
 }
 
+/* Stage 4.6 (compact): walk every FAT entry and free those that are
+ * in-use but unreachable from any directory (bitmap unset after the
+ * Phase 3 walk). Single sector-by-sector pass: read FAT 1, patch
+ * orphan entries to zero in place, write back to FAT 1 (and FAT 2
+ * if n_fats == 2). The whole sweep counts as one logical fix.
+ * FAT16 and FAT32 share the loop body via `shift` (1 vs 2 = bytes
+ * per entry log2). */
+static int phase4_lost(vol_t *fs)
+{
+    DWORD lost_n = 0ul;
+    DWORD sec_idx;
+    UINT  shift, n_per;
+    DWORD bad_marker;
+    LBA_t fat1, fat2;
+
+    prt_str("Phase 4: lost clusters\r\n");
+
+#if CHKDSK_FAT32
+    if (fs->fs_type == FS_FAT32)      { shift = 2u; n_per = 128u; bad_marker = 0x0FFFFFF7ul; }
+    else
+#endif
+#if CHKDSK_FAT16
+    if (fs->fs_type == FS_FAT16)      { shift = 1u; n_per = 256u; bad_marker = 0xFFF7ul;     }
+    else
+#endif
+    { prt_str("  (skipped)\r\n"); return 0; }
+
+    fat1 = fs->fatbase;
+    fat2 = fat1 + (LBA_t)fs->fsize;
+
+    for (sec_idx = 0ul; sec_idx < fs->fsize; sec_idx++) {
+        DWORD start_c = (shift == 2u) ? (sec_idx << 7) : (sec_idx << 8);
+        UINT  cc_in;
+        int   dirty = 0;
+
+        if (start_c >= fs->n_fatent) break;
+
+        if (disk_read(0u, g_sect_a, fat1 + (LBA_t)sec_idx, 1u) != RES_OK) {
+            prt_str("  ERROR: FAT read failed\r\n");
+            return -1;
+        }
+        chain_invalidate();
+
+        for (cc_in = 0u; cc_in < n_per; cc_in++) {
+            DWORD cc  = start_c + (DWORD)cc_in;
+            UINT  pos = cc_in << shift;
+            DWORD v;
+
+            if (cc < 2ul || cc >= fs->n_fatent) continue;
+            if (bitmap_get((u32)cc)) continue;
+
+            v = (DWORD)g_sect_a[pos] | ((DWORD)g_sect_a[pos + 1u] << 8);
+            if (shift == 2u) {
+                v |= ((DWORD)g_sect_a[pos + 2u] << 16)
+                   | ((DWORD)(g_sect_a[pos + 3u] & 0x0Fu) << 24);
+            }
+            if (v == 0ul || v == bad_marker) continue;
+
+            if (fix_enabled()) {
+                g_sect_a[pos]      = 0u;
+                g_sect_a[pos + 1u] = 0u;
+                if (shift == 2u) {
+                    g_sect_a[pos + 2u]  = 0u;
+                    g_sect_a[pos + 3u] &= 0xF0u;
+                }
+                dirty = 1;
+            }
+            lost_n++;
+        }
+
+        if (dirty) {
+            if (!fix_write(fat1 + (LBA_t)sec_idx, g_sect_a, 1u)) return -1;
+            if (fs->n_fats == 2u
+                && !fix_write(fat2 + (LBA_t)sec_idx, g_sect_a, 1u)) return -1;
+        }
+    }
+
+    if (lost_n == 0ul) {
+        prt_str("  No issues\r\n");
+    } else if (fix_enabled()) {
+        prt_str("  Freed ");
+        prt_dec((unsigned long)lost_n);
+        prt_str(" lost cluster(s)\r\n");
+        fix_count_found();
+        fix_count_applied();
+    } else {
+        prt_str("  Found ");
+        prt_dec((unsigned long)lost_n);
+        prt_str(" lost cluster(s); /F to free\r\n");
+        fix_count_found();
+    }
+    return (lost_n == 0ul) ? 0 : 1;
+}
+
 int scan_run(vol_t *fs)
 {
     scan_totals_t t;
+    int           lost_rc;
 
     prt_str("Phase 3: directory and chain walk\r\n");
 
@@ -520,7 +622,10 @@ int scan_run(vol_t *fs)
     emit_count(" depth-cap=",   t.depth_capped);
     prt_nl();
 
+    lost_rc = phase4_lost(fs);
+
     bitmap_release();
+    if (lost_rc < 0) return -1;
     return (int)(t.flagged + t.cycles + t.cross_links + t.broken_chains
-               + t.truncated + t.excess);
+               + t.truncated + t.excess) + lost_rc;
 }
