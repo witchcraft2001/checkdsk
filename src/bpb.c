@@ -16,6 +16,7 @@
 #include "diskio.h"
 #include "bpb.h"
 #include "sectbuf.h"
+#include "fix.h"
 #include "prt.h"
 
 #define SECTOR_SIZE 512u
@@ -57,6 +58,7 @@ static void bpb_err(const char *msg, int *errs)
     prt_str(msg);
     prt_nl();
     (*errs)++;
+    fix_count_found();
 }
 
 static int report_mount_failure(int mount_rc)

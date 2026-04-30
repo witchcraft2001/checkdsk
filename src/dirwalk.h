@@ -54,4 +54,13 @@ int  dirwalk_next(dirwalk_t *w, BYTE **out_entry);
  * exact same offset. No-op if the walker is at a sector boundary. */
 void dirwalk_buffer_dirty(dirwalk_t *w);
 
+/* Return the on-disk location of the entry most recently returned by
+ * dirwalk_next: *out_sect = volume-relative LBA of the sector that
+ * contains the entry, *out_off = byte offset within that sector
+ * (multiple of 32). Used by repair sites that need to write back a
+ * mutated entry. Behaviour is undefined if dirwalk_next has not been
+ * called or returned 0/-1. */
+void dirwalk_last_entry_location(const dirwalk_t *w,
+                                 LBA_t *out_sect, WORD *out_off);
+
 #endif /* CHKDSK_DIRWALK_H */

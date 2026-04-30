@@ -18,6 +18,7 @@
 #include "bpb.h"
 #include "fat.h"
 #include "scan.h"
+#include "fix.h"
 #include "prt.h"
 
 #ifndef CHKDISK_VERSION
@@ -32,8 +33,9 @@ static void print_banner(void)
 static void print_usage(void)
 {
     print_banner();
-    prt_str("Usage: CHKDSK <drive>:\r\n");
+    prt_str("Usage: CHKDSK <drive>: [/F]\r\n");
     prt_str("  <drive>:  A, B (floppies) or C, D, ... (IDE partitions)\r\n");
+    prt_str("  /F        apply repairs (default: report only)\r\n");
     prt_str("  /?        this help\r\n");
 }
 
@@ -67,6 +69,10 @@ static u8 dispatch(char letter)
 
     volume_apply(&g_vol);
 
+    prt_str("Mode: ");
+    prt_str(fix_enabled() ? "write (repairs will be applied)" : "read-only");
+    prt_str("\r\n");
+
     /* Mount first so the BPB diagnostic can speak in terms of the
      * already-parsed vol_t -- avoids parsing the BPB twice. */
     mrc = vol_mount(&g_fs, 0u);
@@ -91,7 +97,8 @@ static u8 dispatch(char letter)
         prt_str(" (summary skipped)\r\n");
     }
 
-    return total_errs > 0 ? 1u : 0u;
+    fix_print_summary();
+    return (total_errs > 0 || fix_any_found()) ? 1u : 0u;
 }
 
 /* Same rationale as g_vol/g_fs above -- keep cmdbuf out of the stack. */
@@ -100,9 +107,11 @@ static char *g_argv[CHKDSK_MAX_ARGV];
 
 void main(void)
 {
-    int  argc;
-    char letter;
-    u8   code;
+    int   argc;
+    int   i;
+    char *drive_arg = (char *)0;
+    char  letter;
+    u8    code;
 
     cmd_read_safe(g_cmdbuf, (int)sizeof(g_cmdbuf));
     argc = cmd_parse(g_cmdbuf, g_argv);
@@ -112,20 +121,34 @@ void main(void)
         dss_exit(2u);
         return;
     }
-    if (cmd_strieq(g_argv[0], "/?") || cmd_strieq(g_argv[0], "-h") ||
-        cmd_strieq(g_argv[0], "--help")) {
-        print_usage();
-        dss_exit(0u);
-        return;
+
+    for (i = 0; i < argc; i++) {
+        if (cmd_strieq(g_argv[i], "/?") || cmd_strieq(g_argv[i], "-h") ||
+            cmd_strieq(g_argv[i], "--help")) {
+            print_usage();
+            dss_exit(0u);
+            return;
+        }
+        if (cmd_strieq(g_argv[i], "/F") || cmd_strieq(g_argv[i], "/FIX")) {
+            fix_enable();
+            continue;
+        }
+        if (drive_arg != (char *)0) {
+            prt_str("checkdsk: too many arguments\r\n");
+            dss_exit(2u);
+            return;
+        }
+        drive_arg = g_argv[i];
     }
 
-    if (g_argv[0][0] == '\0' || g_argv[0][1] != ':' || g_argv[0][2] != '\0') {
+    if (drive_arg == (char *)0 ||
+        drive_arg[0] == '\0' || drive_arg[1] != ':' || drive_arg[2] != '\0') {
         prt_str("checkdsk: argument must be a single drive like \"C:\"\r\n");
         dss_exit(2u);
         return;
     }
 
-    letter = g_argv[0][0];
+    letter = drive_arg[0];
     if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
     print_banner();
     code = dispatch(letter);

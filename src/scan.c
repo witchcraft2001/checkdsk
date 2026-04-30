@@ -24,10 +24,13 @@
 
 #include <sprinter.h>
 #include "vol.h"
+#include "diskio.h"
+#include "sectbuf.h"
 #include "bitmap.h"
 #include "chain.h"
 #include "dirwalk.h"
 #include "dirent.h"
+#include "fix.h"
 #include "prt.h"
 #include "scan.h"
 
@@ -133,10 +136,16 @@ static void copy_name(BYTE *dst, const BYTE *src)
 }
 
 /* Returns 1 if the entry can be descended into (a real subdir, not
- * "." / ".."), 0 otherwise. A directory with non-zero size is treated
- * as corrupt and not entered -- otherwise we read random data as 32-byte
- * directory entries and emit a cascade of garbage findings. */
-static int is_descendable_dir(const BYTE *e)
+ * "." / ".."), 0 otherwise. A directory with non-zero size, or any
+ * DE_ANY_ERROR flag set on the entry, is treated as corrupt and not
+ * entered -- otherwise we read random data as 32-byte directory
+ * entries and emit a cascade of garbage findings. (Stage 4.2's
+ * dir-size repair is irreversible, so even after a previous /F run
+ * an entry that originally was a corrupted file may now look like
+ * a clean dir; the dflags guard catches that case via the other
+ * tell-tale flags -- bad-name, attr-rsv, clust-oor, fat16-hi,
+ * vol-nz, lfn-bad.) */
+static int is_descendable_dir(const BYTE *e, UINT dflags)
 {
     DWORD size;
     if (e[0] == 0xE5u)                  return 0;
@@ -147,7 +156,26 @@ static int is_descendable_dir(const BYTE *e)
     size = ((DWORD)e[31] << 24) | ((DWORD)e[30] << 16)
          | ((DWORD)e[29] << 8)  | (DWORD)e[28];
     if (size != 0ul)                    return 0;
+    if (dflags & DE_ANY_ERROR)          return 0;
     return 1;
+}
+
+/* Peek at the first 32-byte slot of `clust` -- a real subdirectory's
+ * first slot is the "." entry (a '.' followed by 10 spaces). If the
+ * first byte isn't '.', `clust` points at user data, not a directory,
+ * and we must not descend (otherwise random file content gets parsed
+ * as 32-byte dir entries and produces a cascade of garbage findings).
+ * Catches Stage-4.2-corrupted files masquerading as empty dirs after
+ * their size DWORD has been zeroed on a prior /F run.
+ *
+ * Side effect: clobbers g_sect_a -- caller must mark the parent
+ * walker buffer_dirty afterwards. */
+static int dir_has_dot_entry(vol_t *fs, DWORD clust)
+{
+    LBA_t lba = chain_cluster_to_lba(fs, clust);
+    if (disk_read(0u, g_sect_a, lba, 1u) != RES_OK) return 0;
+    chain_invalidate();
+    return (g_sect_a[0] == '.') ? 1 : 0;
 }
 
 /* Walk the FAT chain at `start`, marking visited clusters in the bitmap.
@@ -227,6 +255,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     DWORD         size;
     DWORD         chain_len;
     int           is_file;
+    int           has_dot;   /* -1=not peeked, 0=garbage, 1=real subdir */
 
     frame = &g_frames[*depth];
     rc = dirwalk_next(&frame->walker, &src);
@@ -272,6 +301,21 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         }
     }
 
+    /* Peek at the first cluster of any ATTR_DIR entry that has a usable
+     * cluster pointer: the result drives both the dir-corrupt repair
+     * (real subdir vs file-masquerading-as-dir) and the descent guard.
+     * Skipped for "." / ".." (filtered out at the top), 0xE5 slots,
+     * volume labels, LFN slots, and out-of-range cluster pointers --
+     * those can't be descended into anyway. */
+    has_dot = -1;
+    if (ent[0] != 0xE5u && (ent[11] & 0x3Fu) != ATTR_LFN
+        && (ent[11] & ATTR_DIR) && !(ent[11] & ATTR_VOLID)
+        && clust >= 2ul && clust < fs->n_fatent
+        && (cflags & (CW_CYCLE | CW_IO_ERR)) == 0u) {
+        has_dot = dir_has_dot_entry(fs, clust);
+        dirwalk_buffer_dirty(&frame->walker);
+    }
+
     {
         UINT de_err = dflags & DE_ANY_ERROR;
         if (de_err || cflags) {
@@ -280,19 +324,44 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             if (de_err) dirent_flags_print(dflags);
             if (cflags) print_cw_tags(cflags);
             prt_nl();
-            if (de_err) t->flagged++;
+        }
+        if (de_err) { t->flagged++; fix_count_found(); }
+
+        /* Stage 4.2: ATTR_DIR with a non-zero size DWORD. Two flavours:
+         *   has_dot == 1 -- a real subdir whose size got corrupted; just
+         *                   zero the size DWORD, structure stays intact.
+         *   otherwise    -- a file whose attribute byte got corrupted to
+         *                   include ATTR_DIR; mark the entry deleted so
+         *                   the walker can't be tricked into descending
+         *                   into user data. The cluster chain becomes
+         *                   orphaned (Stage 4.6 will recover it). */
+        if (dflags & DE_DIR_NONZERO_SIZE) {
+            LBA_t sect; WORD off;
+            int   ok;
+            dirwalk_last_entry_location(&frame->walker, &sect, &off);
+            ok = (has_dot == 1) ? fix_dir_size_zero(sect, off)
+                                : fix_entry_delete(sect, off);
+            if (ok) {
+                if (fix_enabled()) {
+                    /* Sector reload clobbered g_sect_a -- walker stale. */
+                    dirwalk_buffer_dirty(&frame->walker);
+                }
+            } else {
+                prt_str("  WARN: dir-corrupt repair failed\r\n");
+            }
         }
     }
 
-    if (cflags & CW_CYCLE)     t->cycles++;
-    if (cflags & CW_CROSS)     t->cross_links++;
-    if (cflags & CW_BROKEN)    t->broken_chains++;
-    if (cflags & CW_TRUNCATED) t->truncated++;
-    if (cflags & CW_EXCESS)    t->excess++;
+    if (cflags & CW_CYCLE)     { t->cycles++;         fix_count_found(); }
+    if (cflags & CW_CROSS)     { t->cross_links++;    fix_count_found(); }
+    if (cflags & CW_BROKEN)    { t->broken_chains++;  fix_count_found(); }
+    if (cflags & CW_TRUNCATED) { t->truncated++;      fix_count_found(); }
+    if (cflags & CW_EXCESS)    { t->excess++;         fix_count_found(); }
 
-    if (!is_descendable_dir(ent)) return 1;
+    if (!is_descendable_dir(ent, dflags)) return 1;
     if (clust < 2ul || clust >= fs->n_fatent) return 1;
     if (cflags & (CW_CYCLE | CW_IO_ERR)) return 1;
+    if (has_dot != 1) return 1;
 
     if (*depth >= SCAN_MAX_DEPTH) {
         prt_str("  depth-limit ");

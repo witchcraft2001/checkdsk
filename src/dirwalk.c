@@ -52,6 +52,16 @@ void dirwalk_buffer_dirty(dirwalk_t *w)
     w->buffer_dirty = 1u;
 }
 
+void dirwalk_last_entry_location(const dirwalk_t *w,
+                                 LBA_t *out_sect, WORD *out_off)
+{
+    /* cur_sect was incremented after load_dir_sector, so the live sector
+     * is cur_sect - 1. sect_off was advanced past the just-returned
+     * 32-byte entry, so its on-sector offset is sect_off - DIRENT_SIZE. */
+    *out_sect = w->cur_sect - 1u;
+    *out_off  = (WORD)(w->sect_off - DIRENT_SIZE);
+}
+
 /* Load the sector at w->cur_sect into g_sect_a, advance bookkeeping.
  * Returns 1 ok, -1 on I/O error. */
 static int load_dir_sector(dirwalk_t *w)

@@ -13,6 +13,7 @@
 #include "diskio_batch.h"
 #include "fat.h"
 #include "sectbuf.h"
+#include "fix.h"
 #include "prt.h"
 
 #define g_fat_a g_sect_a
@@ -52,6 +53,7 @@ static void fat_err(const char *msg, int *errs)
     prt_str(msg);
     prt_nl();
     (*errs)++;
+    fix_count_found();
 }
 
 static void fat_warn(const char *msg)
@@ -140,6 +142,34 @@ static void validate_one(cnt_t *c,
     case 3u: c->eoc_n++;  break;
     default: note_invalid(c, entry_n, val); break;
     }
+}
+
+/* Stage 4.5: copy FAT 1 over FAT 2 sector by sector. Called only when
+ * /F is set and a FAT 1/2 mismatch was detected. Per FAT spec FAT 1 is
+ * the primary copy, so blanket-overwriting FAT 2 is the safe default
+ * direction; we don't try to choose per-sector winners. Counts as one
+ * logical fix regardless of how many sectors were copied. */
+static int sync_fats(vol_t *fs, int *errs)
+{
+    DWORD sec;
+    LBA_t fat1 = fs->fatbase;
+    LBA_t fat2 = fat1 + (LBA_t)fs->fsize;
+
+    for (sec = 0ul; sec < fs->fsize; sec++) {
+        if (disk_read(0, g_fat_a, fat1 + (LBA_t)sec, 1) != RES_OK) {
+            fat_err("FAT 1 read failed during sync", errs);
+            return -1;
+        }
+        if (!fix_write(fat2 + (LBA_t)sec, g_fat_a, 1u)) {
+            fat_err("FAT 2 write failed during sync", errs);
+            return -1;
+        }
+    }
+    fix_count_applied();
+    prt_str("  Synced FAT 2 from FAT 1 (");
+    prt_dec((unsigned long)fs->fsize);
+    prt_str(" sectors)\r\n");
+    return 0;
 }
 
 #if CHKDSK_FAT16 || CHKDSK_FAT32
@@ -232,6 +262,8 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
         prt_dec(diff_sectors);
         prt_str(" sector(s)\r\n");
         (*errs)++;
+        fix_count_found();
+        if (fix_enabled()) sync_fats(fs, errs);
     }
     return 0;
 }
@@ -316,6 +348,8 @@ static int check_fat12(vol_t *fs, int *errs, cnt_t *c)
             prt_dec(diff_sectors);
             prt_str(" sector(s)\r\n");
             (*errs)++;
+            fix_count_found();
+            if (fix_enabled()) sync_fats(fs, errs);
         }
     }
     return 0;

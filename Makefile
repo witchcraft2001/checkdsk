@@ -1,6 +1,6 @@
 APP        = chkdsk
 VPATH      = src
-SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c mount.c summary.c bpb.c fat.c chain.c bitmap.c dirwalk.c dirent.c scan.c
+SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c mount.c summary.c bpb.c fat.c chain.c bitmap.c dirwalk.c dirent.c scan.c fix.c
 SDK_DIR   ?= ../sdcc-sprinter-sdk/
 CRT0_PAGE2 ?= 0
 # Code+data occupy WIN1+WIN2 (~32 KB), stack at 0xBFFF. Bitmap pages
@@ -22,12 +22,3 @@ APP_CPPFLAGS += -DCHKDISK_VERSION='"$(VERSION)"' \
                 -DCHKDSK_FAT12=$(CHKDSK_FAT12) \
                 -DCHKDSK_FAT16=$(CHKDSK_FAT16) \
                 -DCHKDSK_FAT32=$(CHKDSK_FAT32)
-
-# Pull z80.lib for SDCC runtime helpers (32-bit divide/mod, etc.) that
-# sprinter.lib does not ship. Set SDCC290_BIN_DIR to the SDCC-2.9.0
-# install root, or override EXTRA_LIBS at make-time.
-ifneq ($(strip $(SDCC290_BIN_DIR)),)
-ifeq ($(strip $(EXTRA_LIBS)),)
-EXTRA_LIBS = $(abspath $(SDCC290_BIN_DIR))/opt/sdcc-2.9.0/share/sdcc/lib/z80/z80.lib
-endif
-endif
