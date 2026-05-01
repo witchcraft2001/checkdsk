@@ -1,17 +1,13 @@
 /*
- * scan.h -- Phase 3 directory + FAT-chain scanner.
+ * scan.h -- Phase 3 directory + FAT-chain scanner, Phase 4 lost-
+ * cluster sweep.
  *
- * Walks every directory entry starting from the root, classifies each
- * file/dir's cluster chain, and cross-checks against the FAT (lost
- * clusters, cross-links, truncated chains, etc.). Tracks used clusters
- * in a DSS-page bitmap so a later FAT scan can spot unreferenced
- * allocations.
- *
- * Stage 3.1 is just the wiring stub: allocate the bitmap, exercise
- * the cluster/FAT helpers, free it. Subsequent stages fill in the
- * directory walker (3.2), entry validation (3.3), recursion (3.4),
- * chain validation + lost cluster reporting (3.5), and LFN checks
- * (3.6).
+ * scan_run walks every directory entry starting from the root,
+ * classifies each file/dir's cluster chain, cross-checks against the
+ * FAT (lost clusters, cross-links, truncated chains, etc.), and
+ * tracks used clusters in a DSS-page bitmap. After the directory
+ * walk it runs Phase 4 -- a full FAT sweep that uses the bitmap to
+ * find clusters in use but unreferenced from any directory entry.
  */
 
 #ifndef CHKDSK_SCAN_H

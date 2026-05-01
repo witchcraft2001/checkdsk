@@ -8,7 +8,7 @@ LOG       ?= 0
 # FAT type selection (compile-time). Default: chkdsk.exe handles
 # FAT16+FAT32. Build chkdsk12.exe for floppies as a separate target
 # with CHKDSK_FAT12=1 / FAT16=0 / FAT32=0. At least one must be 1.
-CHKDSK_FAT12 ?= 0
+CHKDSK_FAT12 ?= 1
 CHKDSK_FAT16 ?= 1
 CHKDSK_FAT32 ?= 1
 
@@ -17,7 +17,7 @@ CHKDSK_FAT32 ?= 1
 # BSS-clearing at startup never reaches into the code area; the gap
 # between code-end and data-start is unused fill.
 CODE_LOC   ?= 0x4100
-DATA_LOC   ?= 0xB000
+DATA_LOC   ?= 0xB900
 STACK      ?= 0xBFFF
 
 SDCC       ?= sdcc

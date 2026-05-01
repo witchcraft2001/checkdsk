@@ -1,8 +1,8 @@
 /*
  * dirwalk.h -- iterative 32-byte directory-entry walker.
  *
- * Used by Phase 3 to stream entries from the root (Stage 3.2) and
- * later from sub-directories (Stage 3.4). Handles both layouts:
+ * Used by Phase 3 to stream entries from the root and from sub-
+ * directories. Handles both layouts:
  *   FAT12/16 root  -- fixed `n_rootdir` entries starting at `dirbase`
  *   FAT32 / subdir -- cluster chain followed via chain_get_entry
  *

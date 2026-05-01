@@ -7,8 +7,8 @@
  *
  *   - deleted (e[0] == 0xE5): no checks, returns 0.
  *   - LFN slot ((attr & 0x3F) == 0x0F): type byte / first-cluster word
- *     must be zero. LFN-sequence + checksum cross-checks live in
- *     Stage 3.6 (when CHKDISK_USE_LFN is wired through).
+ *     must be zero. LFN-sequence + checksum cross-checks are done by
+ *     scan.c (it has the per-walker state to track the running group).
  *   - SFN: name character set, reserved attribute bits, attribute
  *     consistency (volume label, directory), first-cluster bounds,
  *     and -- on FAT12/16 -- the high cluster word at offset 20-21.

@@ -1,25 +1,32 @@
 /*
- * scan.c -- Phase 3 driver. See scan.h.
+ * scan.c -- Phase 3 directory walk + Phase 4 lost-cluster sweep.
+ * See scan.h.
  *
- * Stage 3.4: iterative depth-first walk over the entire directory
- * tree starting at the root.  An explicit stack of dirwalk frames
- * caps the recursion depth at SCAN_MAX_DEPTH and keeps the C call
- * stack flat -- the per-frame state lives in BSS.
+ * Phase 3 is an iterative depth-first walk over the directory tree
+ * starting at the root. An explicit stack of dirwalk frames caps the
+ * recursion depth at SCAN_MAX_DEPTH and keeps the C call stack flat
+ * -- the per-frame state (dirwalk position, LFN-group accumulator,
+ * etc.) lives in BSS.
  *
- * Cycle / cross-link detection: bitmap_test_and_set on the first
- * cluster of every sub-directory we enter. A bit already set means
- * either a real loop in the FAT (".." pointing forward) or two
- * directory entries claiming the same starting cluster. We refuse
- * to descend in either case.
+ * Cycle / cross-link detection uses bitmap_test_and_set on the first
+ * cluster of every sub-directory the walker enters. A bit already set
+ * means either a real loop in the FAT (".." pointing forward) or two
+ * directory entries claiming the same starting cluster; the walker
+ * refuses to descend in either case.
  *
- * "." and ".." are skipped during the walk -- their cluster pointers
- * are validated by Stage 3.5 (chain checker), not here.
+ * "." / ".." are special-cased near the top of step(): their cluster
+ * pointers must equal the current dir's start_cluster (".") or the
+ * parent's start_cluster (".." -- 0 if the parent is the root). They
+ * are not counted toward the per-walk entry totals.
+ *
+ * LFN slots run a small per-walker state machine that verifies the
+ * descending order byte, that all slots agree on the checksum byte,
+ * and that the SFN that follows produces the same checksum. A 0xE5
+ * slot (deleted SFN) or any sequence break cancels the running group.
  *
  * Output policy: only flagged entries (and cycle / depth-cap warnings)
  * are echoed, prefixed by their full path. Clean entries are silent;
- * the trailing Totals line gives the population counts. Trees with
- * thousands of entries thus produce a handful of lines unless there
- * are real findings.
+ * the trailing Totals line gives the population counts.
  */
 
 #include <sprinter.h>
@@ -44,6 +51,9 @@ typedef struct {
     dirwalk_t walker;
     BYTE      name[11];      /* parent SFN, valid for depth >= 1 */
     DWORD     start_cluster; /* first cluster of this directory (0 for FAT12/16 root) */
+    BYTE      lfn_count;     /* LFN slots accumulated since last SFN reset (0 = none) */
+    BYTE      lfn_checksum;  /* checksum byte (offset 13) from the first LFN slot */
+    BYTE      lfn_next_ord;  /* expected order byte for the next LFN slot (descending) */
 } scan_frame_t;
 
 static scan_frame_t g_frames[SCAN_MAX_DEPTH + 1u];
@@ -69,13 +79,6 @@ typedef struct {
 #define CW_IO_ERR     0x10u   /* disk_read failure */
 #define CW_TRUNCATED  0x20u   /* file size implies more clusters than chain */
 #define CW_EXCESS     0x40u   /* file size implies fewer clusters than chain */
-
-/* Stage 3.6 (LFN sequence + SFN checksum) deferred -- the rotate-add
- * checksum + per-frame state, even in its minimal form, ate the last
- * static-data bytes left under the 0xBFFF stack ceiling. Future plan:
- * shrink fat.c (6.6 KB) and chain.c by sharing FAT12/16/32 dispatch,
- * which would free the room. dirent_validate keeps the basic per-slot
- * LFN sanity (DE_LFN_BAD: type byte / first cluster). */
 
 static DWORD entry_first_cluster(const BYTE *e)
 {
@@ -149,12 +152,12 @@ static void copy_name(BYTE *dst, const BYTE *src)
  * "." / ".."), 0 otherwise. A directory with non-zero size, or any
  * DE_ANY_ERROR flag set on the entry, is treated as corrupt and not
  * entered -- otherwise we read random data as 32-byte directory
- * entries and emit a cascade of garbage findings. (Stage 4.2's
- * dir-size repair is irreversible, so even after a previous /F run
- * an entry that originally was a corrupted file may now look like
- * a clean dir; the dflags guard catches that case via the other
- * tell-tale flags -- bad-name, attr-rsv, clust-oor, fat16-hi,
- * vol-nz, lfn-bad.) */
+ * entries and emit a cascade of garbage findings.
+ *
+ * The dir-corrupt repair (size-zero or 0xE5) is irreversible -- once
+ * an originally-corrupted file has had its size DWORD zeroed, dflags
+ * comes back clean and only the actual cluster contents tell the
+ * truth. dir_has_dot_entry handles that second-line check. */
 static int is_descendable_dir(const BYTE *e, UINT dflags)
 {
     DWORD size;
@@ -167,6 +170,22 @@ static int is_descendable_dir(const BYTE *e, UINT dflags)
     if (size != 0ul)                    return 0;
     if (dflags & DE_ANY_ERROR)          return 0;
     return 1;
+}
+
+/* SFN checksum used by LFN slots (offset 13). FAT spec algorithm:
+ * rotate the running sum right by one bit, then add the next of the
+ * 11 SFN name bytes. Each LFN slot carries this byte verbatim, and
+ * the sequence is invalid if any LFN slot disagrees with its peers
+ * or with the SFN that follows. */
+static u8 sfn_checksum(const BYTE *name11)
+{
+    u8   sum = 0u;
+    UINT i;
+    for (i = 0u; i < 11u; i++) {
+        sum = (u8)(((sum & 1u) << 7) | (sum >> 1));
+        sum = (u8)(sum + name11[i]);
+    }
+    return sum;
 }
 
 /* Peek at the first 32-byte slot of `clust` -- a real subdirectory's
@@ -281,8 +300,58 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
 
     for (i = 0u; i < 32u; i++) ent[i] = src[i];
 
-    /* Stage 4.3: validate "." / ".." cluster pointers, then continue
-     * iteration without counting them as regular entries.
+    /* LFN sequence + SFN-checksum check. Walk-order assumes LFN slots
+     * immediately precede their SFN. The first slot of a group has
+     * the 0x40 flag set in the order byte; subsequent slots carry
+     * decreasing orders. All slots in a group must agree on the
+     * checksum byte, and the SFN that follows must produce the same
+     * checksum. A deleted entry (0xE5) cancels any pending LFN group. */
+    if (ent[0] == 0xE5u) {
+        frame->lfn_count = 0u;
+    } else if ((ent[11] & 0x3Fu) == ATTR_LFN) {
+        BYTE ord = ent[0];
+        BYTE chk = ent[13];
+        int  bad = 0;
+        if (ord & 0x40u) {
+            frame->lfn_count    = 1u;
+            frame->lfn_checksum = chk;
+            frame->lfn_next_ord = (BYTE)((ord & 0x3Fu) - 1u);
+        } else if (frame->lfn_count > 0u) {
+            if (ord != frame->lfn_next_ord || chk != frame->lfn_checksum) {
+                bad = 1;
+            } else {
+                frame->lfn_count++;
+                if (frame->lfn_next_ord > 0u) frame->lfn_next_ord--;
+            }
+        } else {
+            bad = 1;       /* orphan continuation slot, no 0x40 start */
+        }
+        if (bad) {
+            prt_str("  ");
+            print_path(*depth);
+            prt_str("[lfn ord=0x");
+            prt_hex((unsigned long)ord, 2u);
+            prt_str("] * lfn-seq\r\n");
+            t->flagged++;
+            fix_count_found();
+            frame->lfn_count = 0u;
+        }
+        t->entries++;
+        return 1;
+    } else if (frame->lfn_count > 0u) {
+        if (sfn_checksum(ent) != frame->lfn_checksum) {
+            prt_str("  ");
+            print_path(*depth);
+            print_sfn(ent);
+            prt_str(" * lfn-checksum\r\n");
+            t->flagged++;
+            fix_count_found();
+        }
+        frame->lfn_count = 0u;
+    }
+
+    /* Validate "." / ".." cluster pointers, then continue iteration
+     * without counting them as regular entries.
      *   "."  must point at the directory's own first cluster
      *   ".." must point at the parent's first cluster, or 0 when the
      *        parent is the root (per FAT spec, regardless of FAT type).
@@ -376,14 +445,15 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         }
         if (de_err) { t->flagged++; fix_count_found(); }
 
-        /* Stage 4.2: ATTR_DIR with a non-zero size DWORD. Two flavours:
+        /* ATTR_DIR with a non-zero size DWORD. Two flavours:
          *   has_dot == 1 -- a real subdir whose size got corrupted; just
          *                   zero the size DWORD, structure stays intact.
          *   otherwise    -- a file whose attribute byte got corrupted to
          *                   include ATTR_DIR; mark the entry deleted so
          *                   the walker can't be tricked into descending
          *                   into user data. The cluster chain becomes
-         *                   orphaned (Stage 4.6 will recover it). */
+         *                   orphaned and is later recovered by the
+         *                   Phase 4 lost-cluster sweep. */
         if (dflags & DE_DIR_NONZERO_SIZE) {
             LBA_t sect; WORD off;
             int   ok;
@@ -408,11 +478,11 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     if (cflags & CW_TRUNCATED) { t->truncated++;      fix_count_found(); }
     if (cflags & CW_EXCESS)    { t->excess++;         fix_count_found(); }
 
-    /* Stage 4.4: shrink the file's size DWORD to match the actual chain
-     * coverage when the chain was cut short or hit garbage. Covers
-     * TRUNCATED (clean EOC earlier than expected), BROKEN/BAD (hard
-     * error mid-chain), and CROSS (chain ran into territory already
-     * claimed by another file). */
+    /* Shrink the file's size DWORD to match the actual chain coverage
+     * when the chain was cut short or hit garbage. Covers TRUNCATED
+     * (clean EOC earlier than expected), BROKEN/BAD (hard error mid-
+     * chain), and CROSS (chain ran into territory already claimed by
+     * another file). */
     if (is_file && size != 0ul && chain_len != 0ul
         && (cflags & (CW_BROKEN | CW_BAD | CW_TRUNCATED | CW_CROSS)) != 0u) {
         DWORD cluster_bytes  = (DWORD)fs->csize << 9;
@@ -428,7 +498,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         }
     }
 
-    /* Stage 4.7: chain runs longer than the file's size requires.
+    /* Chain runs longer than the file's size requires (CW_EXCESS).
      * Walk forward `expected - 1` steps to find the last cluster to
      * keep, write EOC there to terminate the chain, then walk and
      * free the trailing portion (FAT entries set to 0). All FAT
@@ -489,6 +559,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     t->dirs++;
     copy_name(g_frames[*depth].name, ent);
     g_frames[*depth].start_cluster = clust;
+    g_frames[*depth].lfn_count = 0u;
     dirwalk_open_chain(&g_frames[*depth].walker, fs, clust);
     dirwalk_buffer_dirty(&g_frames[*depth - 1u].walker);
     return 1;
@@ -524,6 +595,7 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
      * though no dots will be checked here. */
     g_frames[0].start_cluster =
         (fs->fs_type == FS_FAT32) ? (DWORD)fs->dirbase : 0ul;
+    g_frames[0].lfn_count = 0u;
     dirwalk_open_root(&g_frames[0].walker, fs);
 
     for (;;) {

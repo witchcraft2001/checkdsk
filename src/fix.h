@@ -61,12 +61,12 @@ int  fix_any_found(void);
 #define FIX_DPATCH_DELETE     1u  /* mark entry deleted (off byte = 0xE5) */
 #define FIX_DPATCH_DOT_CLUST  2u  /* set FstClus(HI|LO) (off+20..21,26..27) */
 
-/* Stage 4.7: write `value` (next-cluster, EOC, BAD, or 0=free) to the
- * FAT entry for `clust`. Mirrors into FAT 2 if n_fats == 2. Reads the
- * FAT sector into g_sect_a, patches the entry in place, writes back.
- * Does NOT bump the "applied" counter -- callers chain many calls
- * into one logical repair. Returns 0 on I/O error or if the FAT type
- * is not 16 / 32. */
+/* Write `value` (next-cluster, EOC, BAD, or 0=free) to the FAT entry
+ * for `clust`. Mirrors into FAT 2 if n_fats == 2. Reads the FAT sector
+ * into g_sect_a, patches the entry in place, writes back. Does NOT
+ * bump the "applied" counter -- callers chain many calls into one
+ * logical repair. Returns 0 on I/O error or if the FAT type is not
+ * 16 / 32. */
 int  fix_fat_set(vol_t *fs, DWORD clust, DWORD value);
 
 /* Patch the 32-byte directory entry at on-disk position (sect, off).

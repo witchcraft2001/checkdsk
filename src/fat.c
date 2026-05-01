@@ -144,11 +144,12 @@ static void validate_one(cnt_t *c,
     }
 }
 
-/* Stage 4.5: copy FAT 1 over FAT 2 sector by sector. Called only when
- * /F is set and a FAT 1/2 mismatch was detected. Per FAT spec FAT 1 is
- * the primary copy, so blanket-overwriting FAT 2 is the safe default
- * direction; we don't try to choose per-sector winners. Counts as one
- * logical fix regardless of how many sectors were copied. */
+/* Copy FAT 1 over FAT 2 sector by sector. Called only when /F is set
+ * and a FAT 1/2 mismatch was detected during the validation pass. Per
+ * FAT spec FAT 1 is the primary copy, so blanket-overwriting FAT 2 is
+ * the safe default direction; we don't try to choose per-sector
+ * winners. Counts as one logical fix regardless of how many sectors
+ * were copied. */
 static int sync_fats(vol_t *fs, int *errs)
 {
     DWORD sec;
