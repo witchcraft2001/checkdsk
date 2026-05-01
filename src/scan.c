@@ -253,6 +253,7 @@ static void print_cw_tags(UINT cflags)
 /* Emit "  /A/B/NAME.EXT" -- the full path of a flagged entry. */
 static void print_flagged(BYTE depth, const BYTE *e)
 {
+    fix_verbose_flush();
     prt_str("  ");
     print_path(depth);
     if ((e[11] & 0x3Fu) == ATTR_LFN) {
@@ -330,6 +331,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             bad = 1;       /* orphan continuation slot, no 0x40 start */
         }
         if (bad) {
+            fix_verbose_flush();
             prt_str("  ");
             print_path(*depth);
             prt_str("[lfn ord=0x");
@@ -343,6 +345,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         return 1;
     } else if (frame->lfn_count > 0u) {
         if (sfn_checksum(ent) != frame->lfn_checksum) {
+            fix_verbose_flush();
             prt_str("  ");
             print_path(*depth);
             print_sfn(ent);
@@ -374,6 +377,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
                                : g_frames[*depth - 1u].start_cluster;
                 }
                 if (got_clust != expected) {
+                    fix_verbose_flush();
                     prt_str("  ");
                     print_path(*depth);
                     prt_str((dot_kind == 1) ? "." : "..");
@@ -390,6 +394,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
                         if (fix_dir_patch(sect, off, FIX_DPATCH_DOT_CLUST, expected)) {
                             dirwalk_buffer_dirty(&frame->walker);
                         } else {
+                            fix_verbose_flush();
                             prt_str("  WARN: dot-clust repair failed\r\n");
                         }
                     }
@@ -400,7 +405,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     }
 
     t->entries++;
-    if (fix_verbose_enabled() && (t->entries & 0x7Ful) == 0ul) prt_chr('.');
+    if ((t->entries & 0x7Ful) == 0ul) fix_verbose_tick();
     dflags    = dirent_validate(fs, ent);
     cflags    = 0u;
     chain_len = 0ul;
@@ -471,6 +476,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
                     dirwalk_buffer_dirty(&frame->walker);
                 }
             } else {
+                fix_verbose_flush();
                 prt_str("  WARN: dir-corrupt repair failed\r\n");
             }
         }
@@ -497,6 +503,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             if (fix_dir_patch(sect, off, FIX_DPATCH_SIZE, chain_capacity)) {
                 if (fix_enabled()) dirwalk_buffer_dirty(&frame->walker);
             } else {
+                fix_verbose_flush();
                 prt_str("  WARN: chain-size repair failed\r\n");
             }
         }
@@ -537,8 +544,12 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
                 }
             }
         }
-        if (ok) fix_count_applied();
-        else    prt_str("  WARN: chain-truncate repair failed\r\n");
+        if (ok) {
+            fix_count_applied();
+        } else {
+            fix_verbose_flush();
+            prt_str("  WARN: chain-truncate repair failed\r\n");
+        }
         chain_invalidate();
         dirwalk_buffer_dirty(&frame->walker);
     }
@@ -551,6 +562,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     if (has_dot != 1) return 1;
 
     if (*depth >= SCAN_MAX_DEPTH) {
+        fix_verbose_flush();
         prt_str("  depth-limit ");
         print_path(*depth);
         print_sfn(ent);
@@ -804,6 +816,7 @@ static int phase4_lost(vol_t *fs)
                 if (bitmap_get((u32)cc)) continue;
                 v = chain_get_entry(fs, cc);
                 if (v == CHAIN_READ_ERROR) {
+                    fix_verbose_flush();
                     prt_str("  ERROR: FAT read failed\r\n");
                     return -1;
                 }
@@ -818,6 +831,7 @@ static int phase4_lost(vol_t *fs)
             if (bitmap_get((u32)cc)) continue;
             v = chain_get_entry(fs, cc);
             if (v == CHAIN_READ_ERROR) {
+                fix_verbose_flush();
                 prt_str("  ERROR: FAT read failed\r\n");
                 return -1;
             }
@@ -839,9 +853,11 @@ static int phase4_lost(vol_t *fs)
                         seq++;
                         lost_n += chain_len;
                     } else {
+                        fix_verbose_flush();
                         prt_str("  WARN: write FILE entry failed\r\n");
                     }
                 } else {
+                    fix_verbose_flush();
                     prt_str("  WARN: root dir full; chain at cluster ");
                     prt_dec((unsigned long)cc);
                     prt_str(" not converted\r\n");
@@ -850,6 +866,7 @@ static int phase4_lost(vol_t *fs)
             } else {
                 if (fix_enabled()) {
                     if (!fix_fat_set(fs, cc, 0ul)) {
+                        fix_verbose_flush();
                         prt_str("  ERROR: FAT free failed\r\n");
                         return -1;
                     }
@@ -869,28 +886,29 @@ static int phase4_lost(vol_t *fs)
     if (fs->fs_type == FS_FAT16) { shift = 1u; n_per = 256u; bad_marker = 0xFFF7ul; }
     else
 #endif
-    { prt_str("  (skipped)\r\n"); return 0; }
+    { fix_verbose_flush(); prt_str("  (skipped)\r\n"); return 0; }
 
     fat1 = fs->fatbase;
     fat2 = fat1 + (LBA_t)fs->fsize;
 
     if (converting) {
         if (phase4_premark(fs, shift, n_per, bad_marker) < 0) {
+            fix_verbose_flush();
             prt_str("  ERROR: pre-pass FAT read failed\r\n");
             return -1;
         }
     }
 
-    if (fix_verbose_enabled()) prt_str("  ");
     for (sec_idx = 0ul; sec_idx < fs->fsize; sec_idx++) {
         DWORD start_c = (shift == 2u) ? (sec_idx << 7) : (sec_idx << 8);
-        if (fix_verbose_enabled() && (sec_idx & 0x0Ful) == 0ul) prt_chr('.');
+        if ((sec_idx & 0x0Ful) == 0ul) fix_verbose_tick();
         UINT  cc_in;
         int   dirty = 0;
 
         if (start_c >= fs->n_fatent) break;
 
         if (disk_read(0u, g_sect_a, fat1 + (LBA_t)sec_idx, 1u) != RES_OK) {
+            fix_verbose_flush();
             prt_str("  ERROR: FAT read failed\r\n");
             return -1;
         }
@@ -924,15 +942,18 @@ static int phase4_lost(vol_t *fs)
                         seq++;
                         lost_n += chain_len;
                     } else {
+                        fix_verbose_flush();
                         prt_str("  WARN: write FILE entry failed\r\n");
                     }
                 } else {
+                    fix_verbose_flush();
                     prt_str("  WARN: root dir full; chain at cluster ");
                     prt_dec((unsigned long)cc);
                     prt_str(" not converted\r\n");
                 }
                 /* Restore FAT 1 sector for the outer loop. */
                 if (disk_read(0u, g_sect_a, fat1 + (LBA_t)sec_idx, 1u) != RES_OK) {
+                    fix_verbose_flush();
                     prt_str("  ERROR: FAT re-read failed\r\n");
                     return -1;
                 }
@@ -958,7 +979,7 @@ static int phase4_lost(vol_t *fs)
                 && !fix_write(fat2 + (LBA_t)sec_idx, g_sect_a, 1u)) return -1;
         }
     }
-    if (fix_verbose_enabled()) prt_nl();
+    fix_verbose_flush();
 
 phase4_report:
     if (lost_n == 0ul) {
@@ -1002,13 +1023,12 @@ int scan_run(vol_t *fs)
     bitmap_set(0u);
     bitmap_set(1u);
 
-    if (fix_verbose_enabled()) prt_str("  ");
     if (walk_tree(fs, &t) < 0) {
         prt_str("  error: walk aborted\r\n");
         bitmap_release();
         return -1;
     }
-    if (fix_verbose_enabled()) prt_nl();
+    fix_verbose_flush();
 
     prt_str("  Totals: entries=");
     prt_dec((unsigned long)t.entries);

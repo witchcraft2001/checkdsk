@@ -41,6 +41,15 @@ int  fix_convert_enabled(void);
 void fix_enable_verbose(void);
 int  fix_verbose_enabled(void);
 
+/* Verbose-progress helpers. fix_verbose_tick() emits one progress
+ * dot if /V is on and remembers it; fix_verbose_flush() emits a
+ * trailing newline if a dot is currently sitting on the console line.
+ * Diagnostic prints (flagged-entry lines, error / warning messages)
+ * call flush before their first character so they always start at
+ * column 0 instead of running into a half-finished progress streak. */
+void fix_verbose_tick(void);
+void fix_verbose_flush(void);
+
 /* Account for an issue we noticed (called whether or not /F is set). */
 void fix_count_found(void);
 

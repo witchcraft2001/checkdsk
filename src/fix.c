@@ -15,6 +15,7 @@
 static u8    g_fix_enabled = 0u;
 static u8    g_fix_convert = 0u;
 static u8    g_fix_verbose = 0u;
+static u8    g_fix_verbose_dirty = 0u;   /* a progress dot is on the current line */
 static DWORD g_fix_found   = 0ul;
 static DWORD g_fix_applied = 0ul;
 
@@ -24,6 +25,22 @@ void fix_enable_convert(void) { g_fix_convert = 1u; }
 int  fix_convert_enabled(void){ return g_fix_convert ? 1 : 0; }
 void fix_enable_verbose(void) { g_fix_verbose = 1u; }
 int  fix_verbose_enabled(void){ return g_fix_verbose ? 1 : 0; }
+
+void fix_verbose_tick(void)
+{
+    if (!g_fix_verbose) return;
+    if (!g_fix_verbose_dirty) prt_str("  ");   /* indent for a fresh streak */
+    prt_chr('.');
+    g_fix_verbose_dirty = 1u;
+}
+
+void fix_verbose_flush(void)
+{
+    if (g_fix_verbose_dirty) {
+        prt_nl();
+        g_fix_verbose_dirty = 0u;
+    }
+}
 void fix_count_found(void)   { g_fix_found++; }
 void fix_count_applied(void) { g_fix_applied++; }
 int  fix_any_found(void)     { return (g_fix_found != 0ul) ? 1 : 0; }
@@ -158,6 +175,13 @@ void fix_print_summary(void)
         prt_str(" applied=");
         prt_dec((unsigned long)g_fix_applied);
         prt_nl();
+        /* A repair can introduce new entries the walker never saw on
+         * this pass (e.g. /CONVERT creates FILE####.CHK in the root,
+         * EXCESS truncate orphans the trailing chain). Encourage the
+         * user to rerun so those follow-on findings get reported. */
+        if (g_fix_applied != 0ul) {
+            prt_str("Re-run chkdsk to verify the volume is now clean.\r\n");
+        }
     } else {
         prt_str("Found ");
         prt_dec((unsigned long)g_fix_found);

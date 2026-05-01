@@ -52,6 +52,7 @@ static unsigned long ld_dword(const BYTE *p)
 
 static void fat_err(const char *msg, int *errs)
 {
+    fix_verbose_flush();
     prt_str("  ERROR: ");
     prt_str(msg);
     prt_nl();
@@ -61,6 +62,7 @@ static void fat_err(const char *msg, int *errs)
 
 static void fat_warn(const char *msg)
 {
+    fix_verbose_flush();
     prt_str("  WARN: ");
     prt_str(msg);
     prt_nl();
@@ -204,10 +206,9 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
         return -1;
     }
 
-    if (fix_verbose_enabled()) prt_str("  ");
     sec_off = 0;
     while (sec_off < fs->fsize && entry_n < entries_total) {
-        if (fix_verbose_enabled()) prt_chr('.');
+        fix_verbose_tick();
         DWORD remaining = fs->fsize - sec_off;
         u8    batch     = (remaining > BATCH_SECTORS_PER_PAGE)
                           ? (u8)BATCH_SECTORS_PER_PAGE
@@ -260,7 +261,7 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
 
         sec_off += batch;
     }
-    if (fix_verbose_enabled()) prt_nl();
+    fix_verbose_flush();
 
     diskio_batch_close();
 
