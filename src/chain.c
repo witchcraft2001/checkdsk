@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * chain.c -- cluster/LBA helpers + cached FAT-entry reader.
  * See chain.h for the contract.

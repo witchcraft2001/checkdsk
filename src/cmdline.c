@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * cmdline.c -- minimal command-line helpers. Mirrors the patterns in
  * utils/deltree/src/util.c.

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * diskio_batch.c -- DSS page-memory backed batch sector reader. See
  * diskio_batch.h.

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * bpb.c -- Phase 1 boot-sector / BPB diagnostic. See bpb.h.
  *

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * scan.h -- Phase 3 directory + FAT-chain scanner, Phase 4 lost-
  * cluster sweep.

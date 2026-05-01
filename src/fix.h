@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * fix.h -- write-mode infrastructure (`/F` flag).
  *
@@ -30,6 +33,13 @@ int  fix_enabled(void);
  * Has no effect without /F. */
 void fix_enable_convert(void);
 int  fix_convert_enabled(void);
+
+/* Toggled by main.c on `/V` parse. When enabled, the long-running
+ * passes (Phase 2 FAT scan, Phase 3 directory walk, Phase 4 sweep)
+ * emit a progress indicator (one dot per chunk) so the user can tell
+ * the program is working on a multi-second scan. Cosmetic only. */
+void fix_enable_verbose(void);
+int  fix_verbose_enabled(void);
 
 /* Account for an issue we noticed (called whether or not /F is set). */
 void fix_count_found(void);

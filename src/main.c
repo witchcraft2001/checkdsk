@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * main.c -- CHKDSK entry point.
  *
@@ -28,16 +31,18 @@
 static void print_banner(void)
 {
     prt_str("checkdsk " CHKDISK_VERSION " for Sprinter DSS\r\n");
+    prt_str("(c) 2026 Dmitry Mikhalchenkov, Sprinter Team\r\n");
 }
 
 static void print_usage(void)
 {
     print_banner();
-    prt_str("Usage: CHKDSK <drive>: [/F] [/C]\r\n");
+    prt_str("Usage: CHKDSK <drive>: [/F] [/C] [/V]\r\n");
     prt_str("  <drive>:  A, B (floppies) or C, D, ... (IDE partitions)\r\n");
     prt_str("  /F        apply repairs (default: report only)\r\n");
     prt_str("  /C        with /F: convert lost chains to FILE####.CHK\r\n");
     prt_str("            (default: free lost clusters silently)\r\n");
+    prt_str("  /V        verbose progress for the long-running passes\r\n");
     prt_str("  /?        this help\r\n");
 }
 
@@ -137,6 +142,10 @@ void main(void)
         }
         if (cmd_strieq(g_argv[i], "/C") || cmd_strieq(g_argv[i], "/CONVERT")) {
             fix_enable_convert();
+            continue;
+        }
+        if (cmd_strieq(g_argv[i], "/V") || cmd_strieq(g_argv[i], "/VERBOSE")) {
+            fix_enable_verbose();
             continue;
         }
         if (drive_arg != (char *)0) {

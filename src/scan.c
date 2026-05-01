@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * scan.c -- Phase 3 directory walk + Phase 4 lost-cluster sweep.
  * See scan.h.
@@ -397,6 +400,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     }
 
     t->entries++;
+    if (fix_verbose_enabled() && (t->entries & 0x7Ful) == 0ul) prt_chr('.');
     dflags    = dirent_validate(fs, ent);
     cflags    = 0u;
     chain_len = 0ul;
@@ -682,7 +686,7 @@ static void format_chk_name(BYTE *out11, DWORD seq)
  * on success, 0 on root full / I/O error. Clobbers g_sect_a. */
 static int find_free_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
 {
-#if CHKDSK_FAT16
+#if CHKDSK_FAT12 || CHKDSK_FAT16
     if (fs->fs_type != FS_FAT32) {
         DWORD ent_idx;
         LBA_t cur_sec = 0xFFFFFFFFul;
@@ -780,6 +784,83 @@ static int phase4_lost(vol_t *fs)
 
     prt_str("Phase 4: lost clusters\r\n");
 
+    converting = fix_enabled() && fix_convert_enabled();
+
+#if CHKDSK_FAT12
+    /* FAT12 has 1.5-byte entries that may straddle a sector boundary,
+     * so the per-sector scan loop used for FAT16/32 doesn't apply.
+     * Walk cluster-by-cluster using chain_get_entry for reads (already
+     * straddle-aware) and fix_fat_set for the per-cluster writes
+     * (likewise). Slow on large volumes -- but FAT12 is bounded to
+     * ~4085 clusters, so this is fine in practice. */
+    if (fs->fs_type == FS_FAT12) {
+        DWORD cc;
+
+        /* Pre-pass for /CONVERT: mark successors so we can identify
+         * chain heads in the main pass. */
+        if (converting) {
+            for (cc = 2ul; cc < fs->n_fatent; cc++) {
+                DWORD v;
+                if (bitmap_get((u32)cc)) continue;
+                v = chain_get_entry(fs, cc);
+                if (v == CHAIN_READ_ERROR) {
+                    prt_str("  ERROR: FAT read failed\r\n");
+                    return -1;
+                }
+                if (v < 2ul || v >= fs->n_fatent) continue;
+                if (chain_is_bad(fs, v)) continue;
+                bitmap_set((u32)v);
+            }
+        }
+
+        for (cc = 2ul; cc < fs->n_fatent; cc++) {
+            DWORD v;
+            if (bitmap_get((u32)cc)) continue;
+            v = chain_get_entry(fs, cc);
+            if (v == CHAIN_READ_ERROR) {
+                prt_str("  ERROR: FAT read failed\r\n");
+                return -1;
+            }
+            if (v == 0ul || chain_is_bad(fs, v)) continue;
+
+            if (converting) {
+                DWORD chain_len = phase4_walk_chain(fs, cc);
+                LBA_t e_sect;
+                WORD  e_off;
+                BYTE  name[11];
+                if (chain_len == 0ul) {
+                    /* defensive */
+                } else if (find_free_root_slot(fs, &e_sect, &e_off)) {
+                    DWORD cluster_bytes = (DWORD)fs->csize << 9;
+                    format_chk_name(name, seq);
+                    if (write_chk_entry(e_sect, e_off, name, cc,
+                                        chain_len * cluster_bytes)) {
+                        chain_n++;
+                        seq++;
+                        lost_n += chain_len;
+                    } else {
+                        prt_str("  WARN: write FILE entry failed\r\n");
+                    }
+                } else {
+                    prt_str("  WARN: root dir full; chain at cluster ");
+                    prt_dec((unsigned long)cc);
+                    prt_str(" not converted\r\n");
+                }
+                chain_invalidate();
+            } else {
+                if (fix_enabled()) {
+                    if (!fix_fat_set(fs, cc, 0ul)) {
+                        prt_str("  ERROR: FAT free failed\r\n");
+                        return -1;
+                    }
+                }
+                lost_n++;
+            }
+        }
+        goto phase4_report;
+    }
+#endif
+
 #if CHKDSK_FAT32
     if (fs->fs_type == FS_FAT32) { shift = 2u; n_per = 128u; bad_marker = 0x0FFFFFF7ul; }
     else
@@ -790,7 +871,6 @@ static int phase4_lost(vol_t *fs)
 #endif
     { prt_str("  (skipped)\r\n"); return 0; }
 
-    converting = fix_enabled() && fix_convert_enabled();
     fat1 = fs->fatbase;
     fat2 = fat1 + (LBA_t)fs->fsize;
 
@@ -801,8 +881,10 @@ static int phase4_lost(vol_t *fs)
         }
     }
 
+    if (fix_verbose_enabled()) prt_str("  ");
     for (sec_idx = 0ul; sec_idx < fs->fsize; sec_idx++) {
         DWORD start_c = (shift == 2u) ? (sec_idx << 7) : (sec_idx << 8);
+        if (fix_verbose_enabled() && (sec_idx & 0x0Ful) == 0ul) prt_chr('.');
         UINT  cc_in;
         int   dirty = 0;
 
@@ -876,7 +958,9 @@ static int phase4_lost(vol_t *fs)
                 && !fix_write(fat2 + (LBA_t)sec_idx, g_sect_a, 1u)) return -1;
         }
     }
+    if (fix_verbose_enabled()) prt_nl();
 
+phase4_report:
     if (lost_n == 0ul) {
         prt_str("  No issues\r\n");
     } else if (converting) {
@@ -918,11 +1002,13 @@ int scan_run(vol_t *fs)
     bitmap_set(0u);
     bitmap_set(1u);
 
+    if (fix_verbose_enabled()) prt_str("  ");
     if (walk_tree(fs, &t) < 0) {
         prt_str("  error: walk aborted\r\n");
         bitmap_release();
         return -1;
     }
+    if (fix_verbose_enabled()) prt_nl();
 
     prt_str("  Totals: entries=");
     prt_dec((unsigned long)t.entries);

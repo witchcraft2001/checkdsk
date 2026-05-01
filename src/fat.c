@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * fat.c -- Phase 2 FAT-table validator. See fat.h.
  *
@@ -201,8 +204,10 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
         return -1;
     }
 
+    if (fix_verbose_enabled()) prt_str("  ");
     sec_off = 0;
     while (sec_off < fs->fsize && entry_n < entries_total) {
+        if (fix_verbose_enabled()) prt_chr('.');
         DWORD remaining = fs->fsize - sec_off;
         u8    batch     = (remaining > BATCH_SECTORS_PER_PAGE)
                           ? (u8)BATCH_SECTORS_PER_PAGE
@@ -255,6 +260,7 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
 
         sec_off += batch;
     }
+    if (fix_verbose_enabled()) prt_nl();
 
     diskio_batch_close();
 

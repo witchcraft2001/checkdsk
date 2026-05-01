@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * chain.h -- cluster <-> LBA arithmetic and random-access FAT-entry
  * reader used by Phase 3 (directory walk + FAT-chain check).

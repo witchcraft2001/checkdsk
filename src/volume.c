@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * volume.c -- drive-letter resolver. See volume.h for the mapping
  * algorithm and side-effect contract.

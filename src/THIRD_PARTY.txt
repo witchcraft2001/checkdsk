@@ -1,9 +1,0 @@
-Third-party sources vendored into src/
-
-FatFs R0.16 by ChaN (elm-chan.org)
-  License: BSD-style (preserved at the top of diskio.h)
-  Files:   diskio.h
-  Source:  https://elm-chan.org/fsw/ff/arc/ff16.zip
-  Note:    Only the disk_read/disk_write/disk_ioctl interface header
-           is retained; the FatFs core (ff.c, ff.h, ffsystem.c,
-           ffconf.h) was removed and replaced by mount.c + vol.h.

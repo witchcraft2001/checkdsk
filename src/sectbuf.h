@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * sectbuf.h -- two shared 512-byte sector buffers reused across the
  * phases (volume resolve, BPB check, FAT walk).

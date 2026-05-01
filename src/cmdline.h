@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Dmitry Mikhalchenkov, Sprinter Team
+ */
 /*
  * cmdline.h -- minimal command-line helpers, ported from
  * utils/deltree/src/util.c (subset needed for stage 0).
