@@ -66,6 +66,11 @@ u8 *diskio_batch_map(u8 page_idx)
     return (u8 *)BATCH_WIN_BASE;
 }
 
+void diskio_batch_invalidate(void)
+{
+    g_cur_page = 0xFFu;
+}
+
 int diskio_batch_read(unsigned long lba, u8 count, u8 page_idx)
 {
     u8 *base;

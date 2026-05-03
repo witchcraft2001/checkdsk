@@ -50,4 +50,10 @@ int diskio_batch_read(unsigned long lba, u8 count, u8 page_idx);
  * contents. Used to walk previously-read data. */
 u8 *diskio_batch_map(u8 page_idx);
 
+/* Forget any cached "this page is currently mapped to WIN3" state, so
+ * the next diskio_batch_map() / _read() will re-issue the dss_setwin
+ * outp. Call after BIOS calls (e.g. disk_write) that may have moved
+ * the WIN3 mapping from under us. Cheap: just clears a static. */
+void diskio_batch_invalidate(void);
+
 #endif /* CHKDSK_DISKIO_BATCH_H */

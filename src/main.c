@@ -30,25 +30,27 @@
 
 static void print_banner(void)
 {
-    prt_str("checkdsk " CHKDISK_VERSION " for Sprinter DSS\r\n");
-    prt_str("(c) 2026 Dmitry Mikhalchenkov, Sprinter Team\r\n");
+    prt_str("checkdsk " CHKDISK_VERSION "\r\n");
 }
 
 static void print_usage(void)
 {
     print_banner();
-    prt_str("Usage: CHKDSK <drive>: [/F] [/C] [/V]\r\n");
-    prt_str("  <drive>:  A, B (floppies) or C, D, ... (IDE partitions)\r\n");
-    prt_str("  /F        apply repairs (default: report only)\r\n");
-    prt_str("  /C        with /F: convert lost chains to FILE####.CHK\r\n");
-    prt_str("            (default: free lost clusters silently)\r\n");
-    prt_str("  /V        verbose progress for the long-running passes\r\n");
-    prt_str("  /?        this help\r\n");
+    prt_str("Usage: CHKDSK X: [/F] [/C] [/V]\r\n"
+            "  /F  apply repairs\r\n"
+            "  /C  with /F: orphans -> FILE####.CHK\r\n"
+            "  /V  verbose progress\r\n");
 }
 
 /* Big aggregates kept in BSS so dispatch's stack frame stays small --
  * the deep call chain (scan_run -> walk_tree -> step -> walk_chain ->
- * chain_get_entry) needs the headroom. */
+ * chain_get_entry) needs the headroom.
+ *
+ * Left uninitialised: volume_resolve fully populates g_vol before
+ * any read, vol_mount fully populates g_fs before any read. Keeping
+ * them in _DATA (rather than _INITIALIZED) saves ~46 bytes of
+ * _INITIALIZER, which the layout needs to keep stack above the
+ * Phase 2 peak (sums[] back on stack costs ~128 bytes there). */
 static volume_t g_vol;
 static vol_t    g_fs;
 
@@ -61,24 +63,18 @@ static u8 dispatch(char letter)
     total_errs = 0;
 
     vrc = volume_resolve(letter, &g_vol);
-    if (vrc == VOL_ERR_BAD_LETTER) {
-        prt_str("checkdsk: invalid drive letter '");
+    if (vrc == VOL_ERR_BAD_LETTER || vrc == VOL_ERR_UNSUPPORTED) {
+        prt_str("bad drive: ");
         prt_chr(letter);
-        prt_str("'\r\n");
-        return 2u;
-    }
-    if (vrc == VOL_ERR_UNSUPPORTED) {
-        prt_str("checkdsk: drive '");
-        prt_chr(letter);
-        prt_str(":' not present\r\n");
+        prt_nl();
         return 2u;
     }
 
     volume_apply(&g_vol);
 
     prt_str("Mode: ");
-    prt_str(fix_enabled() ? "write (repairs will be applied)" : "read-only");
-    prt_str("\r\n");
+    prt_str(fix_enabled() ? "write" : "read-only");
+    prt_nl();
 
     /* Mount first so the BPB diagnostic can speak in terms of the
      * already-parsed vol_t -- avoids parsing the BPB twice. */
@@ -97,18 +93,23 @@ static u8 dispatch(char letter)
         }
         vol_unmount(&g_fs);
     } else {
-        prt_str("checkdsk: vol_mount rc=");
+        prt_str("mount rc=");
         prt_dec((unsigned long)mrc);
-        prt_str(" err=");
+        prt_str(" be=");
         prt_dec((unsigned long)diskio_dss_last_error());
-        prt_str(" (summary skipped)\r\n");
+        prt_nl();
     }
 
     fix_print_summary();
     return (total_errs > 0 || fix_any_found()) ? 1u : 0u;
 }
 
-/* Same rationale as g_vol/g_fs above -- keep cmdbuf out of the stack. */
+/* Same rationale as g_vol/g_fs above -- keep cmdbuf out of the stack.
+ * Left uninitialized: cmd_read_safe fills g_cmdbuf in full before any
+ * read; cmd_parse populates g_argv. Keeping them in _DATA (rather
+ * than _INITIALIZED) avoids ~56 bytes of _INITIALIZER bloat at a
+ * point in the layout where _INITIALIZER and _INITIALIZED would
+ * otherwise overlap. */
 static char  g_cmdbuf[CHKDSK_MAX_CMDLINE];
 static char *g_argv[CHKDSK_MAX_ARGV];
 
@@ -149,7 +150,7 @@ void main(void)
             continue;
         }
         if (drive_arg != (char *)0) {
-            prt_str("checkdsk: too many arguments\r\n");
+            prt_str("too many args\r\n");
             dss_exit(2u);
             return;
         }
@@ -158,7 +159,7 @@ void main(void)
 
     if (drive_arg == (char *)0 ||
         drive_arg[0] == '\0' || drive_arg[1] != ':' || drive_arg[2] != '\0') {
-        prt_str("checkdsk: argument must be a single drive like \"C:\"\r\n");
+        prt_str("expected drive (e.g. C:)\r\n");
         dss_exit(2u);
         return;
     }

@@ -197,7 +197,17 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
     unsigned long eoc_min = is_fat32 ? EOC32_MIN : (unsigned long)EOC16_MIN;
     UINT          step    = is_fat32 ? 4u : 2u;
     unsigned long diff_sectors = 0ul;
-    unsigned long sums[BATCH_SECTORS_PER_PAGE];
+    /* Borrow the static g_sect_a (512 B sector scratch) as backing
+     * for sums[]. check_fat_wide does NOT touch g_sect_a between
+     * the FAT[0] batch read and the FAT[1] compare (the batch reads
+     * land in WIN3 page memory, not g_sect_a; validate_one only
+     * inspects the page), so the cast-aliasing is safe within this
+     * call. Avoids 128 bytes of stack pressure that previously
+     * pushed Phase 2's peak past the budget and clobbered scan.c's
+     * g_lnf_cur_* and fix.c's g_fix_verbose at the high end of
+     * _INITIALIZED -- causing Phase 4 "WARN: write FILE failed"
+     * cascades and missing /V dots in Phase 3. */
+    unsigned long *sums = (unsigned long *)g_sect_a;
     DWORD         sec_off;
     u8           *page;
 

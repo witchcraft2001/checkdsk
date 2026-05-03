@@ -6,8 +6,10 @@
 - If a rebuild fails, report the failure clearly and do not present the iteration as complete.
 
 ## Development platform
-- Разработка ведётся с использованием `sdcc-sprinter-sdk` под Sprinter DSS.
-- Если требуемой функциональности нет в SDK, не реализовывать обходные пути самостоятельно: согласовать решение с архитектором (человеком) и оформить feature request к SDK.
+- Разработка ведётся под Sprinter DSS.
+- **Сборка проекта — с использованием `sdcc45-sprinter-sdk` (SDCC 4.5).** Это и есть рабочий SDK; именно на него указывает `SDK_DIR ?= ../sdcc45-sprinter-sdk/` в `Makefile`. Все runtime-аспекты (libc, BIOS-обёртки, размеры рантайма, ABI вызовов SDCC) проверять в нём.
+- `sdcc-sprinter-sdk` (без `45`) — это **старый SDK на базе SDCC 2.9.0**, оставлен только как исторический reference для сравнения. Для сборки и для проверки реальных API/рантайма его **не использовать**; если в исторических заметках встретится путь `sdcc-sprinter-sdk/...`, перепроверить эквивалент в `sdcc45-sprinter-sdk/...` перед опорой на него.
+- Если требуемой функциональности нет в SDK (`sdcc45-sprinter-sdk`), не реализовывать обходные пути самостоятельно: согласовать решение с архитектором (человеком) и оформить feature request к SDK.
 
 ## Скрипты сборки и упаковки
 - Любой скрипт, который попадает в репозиторий (`run/`, `tools/` и т. п.), **не должен содержать локальных путей**. Пути — относительные от `script_dir`/`repo_root`, либо принимаются через позиционные аргументы или переменные окружения с дефолтами `${VAR:-...}`.
@@ -29,7 +31,8 @@ Sprinter DSS имеет ограничения на длину имен файл
 
 ## External reference sources
 - You may consult the following local sibling repositories/directories for answers, platform details, and implementation ideas:
-  - `/Users/dmitry/dev/zx/sprinter/sdcc-sprinter-sdk`
+  - `/Users/dmitry/dev/zx/sprinter/sdcc45-sprinter-sdk` — **рабочий SDK сборки (SDCC 4.5)**, источник истины для libc/BIOS/ABI
+  - `/Users/dmitry/dev/zx/sprinter/sdcc-sprinter-sdk` — старый SDK (SDCC 2.9.0), только как исторический reference
   - `/Users/dmitry/dev/zx/sprinter/sprinter_bios`
   - `/Users/dmitry/dev/zx/sprinter/Estex-DSS/`
   - `/Users/dmitry/dev/zx/sprinter/utils`

@@ -33,6 +33,7 @@
  */
 
 #include <sprinter.h>
+#include <string.h>
 #include "vol.h"
 #include "diskio.h"
 #include "sectbuf.h"
@@ -43,23 +44,43 @@
 #include "fix.h"
 #include "prt.h"
 #include "scan.h"
+#include "diskio_batch.h"
+#include "diskio_dss.h"
 
+/* SCAN_MAX_DEPTH bounds the directory recursion in Phase 3.
+ * Each frame is ~35 bytes of static state in g_frames. We size the
+ * runtime to keep the stack at ~255 bytes so the BIOS DRV_READ helper
+ * (which pushes a non-trivial amount of state internally during
+ * multi-sector reads) has headroom -- earlier iterations at depth=7
+ * with full LFN frame state were observed clobbering g_fix_verbose_*
+ * mid-walk. */
 #define SCAN_MAX_DEPTH  10u
 
-#define ATTR_VOLID 0x08u
-#define ATTR_DIR   0x10u
-#define ATTR_LFN   0x0Fu
+#define ATTR_VOLID    0x08u
+#define ATTR_DIR      0x10u
+#define ATTR_LFN      0x0Fu
+#define ATTR_DIR_BYTE 0x10u
+#define LOSTCHN_SFN   "LOSTCHN    "    /* 11 raw SFN bytes */
 
+/* LFN sequence validation was removed to free per-frame state and
+ * step()-stack pressure on the Sprinter target -- the field reports
+ * mid-walk corruption (sparse Phase 3 progress dots, depth-limit
+ * spam) traced to BIOS-call stack overflow into _DATA. ATTR_LFN
+ * entries are now passed over as opaque slots; a future build can
+ * reintroduce LFN parsing as a separate utility. */
 typedef struct {
     dirwalk_t walker;
     BYTE      name[11];      /* parent SFN, valid for depth >= 1 */
     DWORD     start_cluster; /* first cluster of this directory (0 for FAT12/16 root) */
-    BYTE      lfn_count;     /* LFN slots accumulated since last SFN reset (0 = none) */
-    BYTE      lfn_checksum;  /* checksum byte (offset 13) from the first LFN slot */
-    BYTE      lfn_next_ord;  /* expected order byte for the next LFN slot (descending) */
 } scan_frame_t;
 
-static scan_frame_t g_frames[SCAN_MAX_DEPTH + 1u];
+/* NOTE: every uninitialized static in this file is given an explicit
+ * `= {0}` / `= 0`. The Sprinter SDK's crt0.s only zeroes _BSS, but
+ * SDCC z80 places uninitialized statics in _DATA — so without an
+ * explicit initializer they retain whatever bytes were at their
+ * load address at boot time, which corrupts the walker frames, the
+ * LOSTCHN allocation cursor, and the captured fat date/time. */
+static scan_frame_t g_frames[SCAN_MAX_DEPTH + 1u] = {{{0}}};
 
 /* Aggregate counters for the whole walk. */
 typedef struct {
@@ -112,6 +133,25 @@ static int is_dot_entry(const BYTE *e)
         if (e[i] != ' ') return 0;
     }
     return (skip == 2u) ? 2 : 1;
+}
+
+/* Compact diagnostic helpers -- factor out the repeated "  WARN: " /
+ * "  ERROR: " prefix and "\r\n" suffix to dedupe ~14 sites across
+ * scan.c. Each call site goes from three prt_str()s to one helper
+ * call with just the unique tail string. */
+static void warn_str(const char *s)
+{
+    fix_verbose_flush();
+    prt_str("  WARN: ");
+    prt_str(s);
+    prt_nl();
+}
+static void err_str(const char *s)
+{
+    fix_verbose_flush();
+    prt_str("  ERROR: ");
+    prt_str(s);
+    prt_nl();
 }
 
 static void print_sfn(const BYTE *raw)
@@ -173,22 +213,6 @@ static int is_descendable_dir(const BYTE *e, UINT dflags)
     if (size != 0ul)                    return 0;
     if (dflags & DE_ANY_ERROR)          return 0;
     return 1;
-}
-
-/* SFN checksum used by LFN slots (offset 13). FAT spec algorithm:
- * rotate the running sum right by one bit, then add the next of the
- * 11 SFN name bytes. Each LFN slot carries this byte verbatim, and
- * the sequence is invalid if any LFN slot disagrees with its peers
- * or with the SFN that follows. */
-static u8 sfn_checksum(const BYTE *name11)
-{
-    u8   sum = 0u;
-    UINT i;
-    for (i = 0u; i < 11u; i++) {
-        sum = (u8)(((sum & 1u) << 7) | (sum >> 1));
-        sum = (u8)(sum + name11[i]);
-    }
-    return sum;
 }
 
 /* Peek at the first 32-byte slot of `clust` -- a real subdirectory's
@@ -272,7 +296,7 @@ static void print_flagged(BYTE depth, const BYTE *e)
  *
  * IMPORTANT: dirwalk_next returns a pointer INTO g_sect_a. walk_chain
  * uses g_sect_a as its FAT-sector cache, so it clobbers that pointer.
- * We snapshot the 32-byte entry into a local buffer before doing any
+ * We snapshot the 32-byte entry into ent[] before doing any
  * I/O that touches g_sect_a, and operate on the snapshot afterwards. */
 static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
 {
@@ -304,56 +328,11 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
 
     for (i = 0u; i < 32u; i++) ent[i] = src[i];
 
-    /* LFN sequence + SFN-checksum check. Walk-order assumes LFN slots
-     * immediately precede their SFN. The first slot of a group has
-     * the 0x40 flag set in the order byte; subsequent slots carry
-     * decreasing orders. All slots in a group must agree on the
-     * checksum byte, and the SFN that follows must produce the same
-     * checksum. A deleted entry (0xE5) cancels any pending LFN group. */
-    if (ent[0] == 0xE5u) {
-        frame->lfn_count = 0u;
-    } else if ((ent[11] & 0x3Fu) == ATTR_LFN) {
-        BYTE ord = ent[0];
-        BYTE chk = ent[13];
-        int  bad = 0;
-        if (ord & 0x40u) {
-            frame->lfn_count    = 1u;
-            frame->lfn_checksum = chk;
-            frame->lfn_next_ord = (BYTE)((ord & 0x3Fu) - 1u);
-        } else if (frame->lfn_count > 0u) {
-            if (ord != frame->lfn_next_ord || chk != frame->lfn_checksum) {
-                bad = 1;
-            } else {
-                frame->lfn_count++;
-                if (frame->lfn_next_ord > 0u) frame->lfn_next_ord--;
-            }
-        } else {
-            bad = 1;       /* orphan continuation slot, no 0x40 start */
-        }
-        if (bad) {
-            fix_verbose_flush();
-            prt_str("  ");
-            print_path(*depth);
-            prt_str("[lfn ord=0x");
-            prt_hex((unsigned long)ord, 2u);
-            prt_str("] * lfn-seq\r\n");
-            t->flagged++;
-            fix_count_found();
-            frame->lfn_count = 0u;
-        }
+    /* LFN sequence validation removed -- ATTR_LFN slots are counted
+     * but not parsed. See scan_frame_t comment. */
+    if ((ent[11] & 0x3Fu) == ATTR_LFN) {
         t->entries++;
         return 1;
-    } else if (frame->lfn_count > 0u) {
-        if (sfn_checksum(ent) != frame->lfn_checksum) {
-            fix_verbose_flush();
-            prt_str("  ");
-            print_path(*depth);
-            print_sfn(ent);
-            prt_str(" * lfn-checksum\r\n");
-            t->flagged++;
-            fix_count_found();
-        }
-        frame->lfn_count = 0u;
     }
 
     /* Validate "." / ".." cluster pointers, then continue iteration
@@ -394,8 +373,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
                         if (fix_dir_patch(sect, off, FIX_DPATCH_DOT_CLUST, expected)) {
                             dirwalk_buffer_dirty(&frame->walker);
                         } else {
-                            fix_verbose_flush();
-                            prt_str("  WARN: dot-clust repair failed\r\n");
+                            warn_str("dot-clust");
                         }
                     }
                 }
@@ -476,8 +454,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
                     dirwalk_buffer_dirty(&frame->walker);
                 }
             } else {
-                fix_verbose_flush();
-                prt_str("  WARN: dir-corrupt repair failed\r\n");
+                warn_str("dir-corrupt");
             }
         }
     }
@@ -503,8 +480,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             if (fix_dir_patch(sect, off, FIX_DPATCH_SIZE, chain_capacity)) {
                 if (fix_enabled()) dirwalk_buffer_dirty(&frame->walker);
             } else {
-                fix_verbose_flush();
-                prt_str("  WARN: chain-size repair failed\r\n");
+                warn_str("chain-size");
             }
         }
     }
@@ -547,8 +523,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         if (ok) {
             fix_count_applied();
         } else {
-            fix_verbose_flush();
-            prt_str("  WARN: chain-truncate repair failed\r\n");
+            warn_str("chain-trunc");
         }
         chain_invalidate();
         dirwalk_buffer_dirty(&frame->walker);
@@ -575,7 +550,6 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     t->dirs++;
     copy_name(g_frames[*depth].name, ent);
     g_frames[*depth].start_cluster = clust;
-    g_frames[*depth].lfn_count = 0u;
     dirwalk_open_chain(&g_frames[*depth].walker, fs, clust);
     dirwalk_buffer_dirty(&g_frames[*depth - 1u].walker);
     return 1;
@@ -611,7 +585,6 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
      * though no dots will be checked here. */
     g_frames[0].start_cluster =
         (fs->fs_type == FS_FAT32) ? (DWORD)fs->dirbase : 0ul;
-    g_frames[0].lfn_count = 0u;
     dirwalk_open_root(&g_frames[0].walker, fs);
 
     for (;;) {
@@ -622,14 +595,15 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
     return 0;
 }
 
-/* Read a FAT entry value out of g_sect_a at byte offset `pos`.
- * shift = 1 (FAT16, 2 bytes) or 2 (FAT32, 4 bytes; high nibble masked). */
-static DWORD read_fat_entry_in_buf(UINT pos, UINT shift)
+/* Read a FAT entry value out of `buf` at byte offset `pos`.
+ * shift = 1 (FAT16, 2 bytes) or 2 (FAT32, 4 bytes; high nibble masked).
+ * `buf` may be g_sect_a or a batch-page sector slice -- caller's choice. */
+static DWORD read_fat_entry_in_buf(const u8 *buf, UINT pos, UINT shift)
 {
-    DWORD v = (DWORD)g_sect_a[pos] | ((DWORD)g_sect_a[pos + 1u] << 8);
+    DWORD v = (DWORD)buf[pos] | ((DWORD)buf[pos + 1u] << 8);
     if (shift == 2u) {
-        v |= ((DWORD)g_sect_a[pos + 2u] << 16)
-           | ((DWORD)(g_sect_a[pos + 3u] & 0x0Fu) << 24);
+        v |= ((DWORD)buf[pos + 2u] << 16)
+           | ((DWORD)(buf[pos + 3u] & 0x0Fu) << 24);
     }
     return v;
 }
@@ -639,27 +613,50 @@ static DWORD read_fat_entry_in_buf(UINT pos, UINT shift)
  * to a valid cluster v, mark v in the bitmap. After this pass, any
  * orphan cluster c with bitmap[c]==0 is a chain HEAD: nothing in the
  * orphan subgraph references it. Entirely-cyclic orphan groups have
- * no head and are not converted. */
+ * no head and are not converted.
+ *
+ * Caller must already hold an open batch (diskio_batch_open(1u)) -- we
+ * reuse the same WIN3 page so opening/closing twice is avoided. */
 static int phase4_premark(vol_t *fs, UINT shift, UINT n_per, DWORD bad)
 {
-    DWORD sec_idx;
-    LBA_t fat1 = fs->fatbase;
+    DWORD sec_off = 0ul;
+    LBA_t fat1    = fs->fatbase;
 
-    for (sec_idx = 0ul; sec_idx < fs->fsize; sec_idx++) {
-        DWORD start_c = (shift == 2u) ? (sec_idx << 7) : (sec_idx << 8);
-        UINT cc_in;
-        if (start_c >= fs->n_fatent) break;
-        if (disk_read(0u, g_sect_a, fat1 + (LBA_t)sec_idx, 1u) != RES_OK) return -1;
-        chain_invalidate();
-        for (cc_in = 0u; cc_in < n_per; cc_in++) {
-            DWORD cc = start_c + (DWORD)cc_in;
-            DWORD v;
-            if (cc < 2ul || cc >= fs->n_fatent) continue;
-            if (bitmap_get((u32)cc)) continue;
-            v = read_fat_entry_in_buf(cc_in << shift, shift);
-            if (v < 2ul || v >= fs->n_fatent || v == bad) continue;
-            bitmap_set((u32)v);
+    while (sec_off < fs->fsize) {
+        DWORD remaining = fs->fsize - sec_off;
+        u8    batch     = (remaining > BATCH_SECTORS_PER_PAGE)
+                          ? (u8)BATCH_SECTORS_PER_PAGE
+                          : (u8)remaining;
+        u8   *page;
+        u8    si;
+
+        fix_verbose_tick();
+
+        if (!diskio_batch_read((unsigned long)(fat1 + (LBA_t)sec_off),
+                               batch, 0u)) return -1;
+        page = diskio_batch_map(0u);
+
+        for (si = 0u; si < batch; si++) {
+            DWORD this_sec  = sec_off + (DWORD)si;
+            DWORD start_c   = (shift == 2u) ? (this_sec << 7)
+                                            : (this_sec << 8);
+            const u8 *sec_buf = page + (UINT)si * 512u;
+            UINT      cc_in;
+
+            if (start_c >= fs->n_fatent) break;
+
+            for (cc_in = 0u; cc_in < n_per; cc_in++) {
+                DWORD cc = start_c + (DWORD)cc_in;
+                DWORD v;
+                if (cc < 2ul || cc >= fs->n_fatent) continue;
+                if (bitmap_get((u32)cc)) continue;
+                v = read_fat_entry_in_buf(sec_buf, cc_in << shift, shift);
+                if (v < 2ul || v >= fs->n_fatent || v == bad) continue;
+                bitmap_set((u32)v);
+            }
         }
+
+        sec_off += (DWORD)batch;
     }
     return 0;
 }
@@ -693,10 +690,22 @@ static void format_chk_name(BYTE *out11, DWORD seq)
     out11[8] = 'C'; out11[9] = 'H'; out11[10] = 'K';
 }
 
-/* Find the first free 32-byte slot in the root directory (byte 0 ==
- * 0xE5 deleted, or 0x00 end-of-dir). Returns 1 with sect/off filled
- * on success, 0 on root full / I/O error. Clobbers g_sect_a. */
-static int find_free_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
+/* Match flavour for find_root_slot:
+ *   0 -- free slot (byte 0 == 0x00 end-of-dir or 0xE5 deleted)
+ *   1 -- existing FILE####.CHK SFN entry (FAT12/16 fallback for
+ *        the LOSTCHN open path; overwriting it leaves the old
+ *        chain dangling, to be reconverted on the next run).
+ *   2 -- existing LOSTCHN dir entry (used by phase4_lostchn_open
+ *        to reuse a LOSTCHN created by a prior /F /C run). */
+#define ROOT_MATCH_FREE      0
+#define ROOT_MATCH_CHK       1
+#define ROOT_MATCH_LOSTCHN   2
+
+/* Find the first slot in the root matching `mode`. Returns 1 with
+ * sect/off filled, 0 on no match / I/O error. Clobbers g_sect_a.
+ * The CHK-mode is FAT12/16 only (FAT32 root auto-extends, so the
+ * mode is meaningless there). */
+static int find_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off, int mode)
 {
 #if CHKDSK_FAT12 || CHKDSK_FAT16
     if (fs->fs_type != FS_FAT32) {
@@ -705,22 +714,35 @@ static int find_free_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
         for (ent_idx = 0ul; ent_idx < (DWORD)fs->n_rootdir; ent_idx++) {
             LBA_t sec = fs->dirbase + (LBA_t)(ent_idx >> 4);
             UINT  off = (UINT)((ent_idx & 0x0Fu) << 5);
+            BYTE *e;
             if (sec != cur_sec) {
                 if (disk_read(0u, g_sect_a, sec, 1u) != RES_OK) return 0;
                 cur_sec = sec;
             }
-            if (g_sect_a[off] == 0x00u || g_sect_a[off] == 0xE5u) {
-                *out_sect = sec;
-                *out_off  = (WORD)off;
-                return 1;
+            e = &g_sect_a[off];
+            if (mode == ROOT_MATCH_CHK) {
+                if (e[0] == 0x00u) return 0;
+                if (e[11] == 0x0Fu) continue;
+                if (e[0] != 'F' || e[1] != 'I' || e[2] != 'L' || e[3] != 'E') continue;
+                if (e[8] != 'C' || e[9] != 'H' || e[10] != 'K') continue;
+            } else if (mode == ROOT_MATCH_LOSTCHN) {
+                if (e[0] == 0x00u) return 0;
+                if ((e[11] & 0x3Fu) == ATTR_LFN) continue;
+                if (!(e[11] & ATTR_DIR_BYTE)) continue;
+                if (memcmp(e, LOSTCHN_SFN, 11u) != 0) continue;
+            } else {
+                if (e[0] != 0x00u && e[0] != 0xE5u) continue;
             }
+            *out_sect = sec; *out_off = (WORD)off;
+            return 1;
         }
         return 0;
     }
 #endif
 #if CHKDSK_FAT32
+    if (mode == ROOT_MATCH_CHK) return 0;
     {
-        DWORD c = (DWORD)fs->dirbase;
+        DWORD c    = (DWORD)fs->dirbase;
         UINT  scnt = fs->csize;
         for (;;) {
             UINT i;
@@ -729,7 +751,18 @@ static int find_free_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
                 UINT off;
                 if (disk_read(0u, g_sect_a, sec, 1u) != RES_OK) return 0;
                 for (off = 0u; off < 512u; off += 32u) {
-                    if (g_sect_a[off] == 0x00u || g_sect_a[off] == 0xE5u) {
+                    BYTE *e = &g_sect_a[off];
+                    int  match = 0;
+                    if (mode == ROOT_MATCH_LOSTCHN) {
+                        if (e[0] == 0x00u) return 0;
+                        if (e[0] == 0xE5u) continue;
+                        if ((e[11] & 0x3Fu) == ATTR_LFN) continue;
+                        if (!(e[11] & ATTR_DIR_BYTE)) continue;
+                        if (memcmp(e, LOSTCHN_SFN, 11u) == 0) match = 1;
+                    } else {
+                        match = (e[0] == 0x00u || e[0] == 0xE5u);
+                    }
+                    if (match) {
                         *out_sect = sec;
                         *out_off  = (WORD)off;
                         return 1;
@@ -748,35 +781,315 @@ static int find_free_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
     return 0;
 }
 
+#define find_free_root_slot(fs, s, o)  find_root_slot((fs), (s), (o), ROOT_MATCH_FREE)
+
+/* Current wall-clock timestamp for newly-created entries, captured
+ * once per phase 4 sweep from DSS. Encoded in FAT 16-bit fields:
+ *   date = (year-1980)<<9 | month<<5 | day
+ *   time = hour<<11 | minute<<5 | second/2 */
+static u16 g_fat_date = 0u;
+static u16 g_fat_time = 0u;
+
+static void phase4_capture_now(void)
+{
+    dss_date_t d;
+    dss_time_t t;
+    BYTE *p;
+
+    dss_getdate(&d);
+    dss_gettime(&t);
+
+    /* Pack byte-wise to avoid 16-bit shifts on Z80. */
+    p = (BYTE *)&g_fat_date;
+    p[0] = (BYTE)((d.month << 5) | d.day);
+    p[1] = (BYTE)(((u8)(d.year - 1980u) << 1) | (d.month >> 3));
+    p = (BYTE *)&g_fat_time;
+    p[0] = (BYTE)((t.minute << 5) | (t.second >> 1));
+    p[1] = (BYTE)((t.hour << 3) | (t.minute >> 3));
+}
+
+/* Stamp creation/access/last-write date+time bytes into a 32-byte
+ * SFN entry. Caller has already zeroed bytes 12..31 (or written
+ * them with values that we are about to overwrite). */
+static void stamp_entry_dt(BYTE *e)
+{
+    BYTE *fb;
+    fb = (BYTE *)&g_fat_time;
+    e[14] = fb[0]; e[15] = fb[1];   /* creation time */
+    e[22] = fb[0]; e[23] = fb[1];   /* last write time */
+    fb = (BYTE *)&g_fat_date;
+    e[16] = fb[0]; e[17] = fb[1];   /* creation date */
+    e[18] = fb[0]; e[19] = fb[1];   /* last access date */
+    e[24] = fb[0]; e[25] = fb[1];   /* last write date */
+}
+
 /* Write a 32-byte SFN entry at (sect, off) describing a FILE####.CHK
- * file: archive attr, no time/date, first cluster + size set from
- * the orphan chain. Re-reads sector, patches in place, writes back. */
+ * file: archive attr, current timestamp, first cluster + size set
+ * from the orphan chain. Re-reads sector, patches in place, writes
+ * back. */
 static int write_chk_entry(LBA_t sect, WORD off, const BYTE *name11,
                            DWORD cluster, DWORD size)
 {
-    UINT  i;
     BYTE *e;
     BYTE *cb;
 
     if (!fix_enabled()) return 1;
     if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
     e = &g_sect_a[off];
-    for (i = 0u;  i < 11u; i++) e[i] = name11[i];
+    memcpy(e, name11, 11u);
     e[11] = 0x20u;                              /* ATTR_ARCHIVE */
-    for (i = 12u; i < 28u; i++) e[i] = 0u;      /* reserved + time/date */
+    memset(e + 12u, 0, 16u);                    /* reserved + time/date */
+    stamp_entry_dt(e);
     cb = (BYTE *)&cluster;
     e[20] = cb[2]; e[21] = cb[3];               /* FstClusHI */
     e[26] = cb[0]; e[27] = cb[1];               /* FstClusLO */
-    cb = (BYTE *)&size;
-    e[28] = cb[0]; e[29] = cb[1]; e[30] = cb[2]; e[31] = cb[3];
+    memcpy(e + 28u, &size, 4u);                 /* file size */
     return fix_write(sect, g_sect_a, 1u);
 }
+
+/* ---------------------------------------------------------------- */
+/* LOSTCHN/ subdirectory (FreeDOS chkdsk convention): destination
+ * for FILE####.CHK entries during /CONVERT on FAT12/16/32 volumes.
+ * Lazy-created on first conversion.
+ *
+ * Reuse policy: phase4_lostchn_open first scans the root for an
+ * existing LOSTCHN dir entry (left over by an earlier /F /C run).
+ * If found, the cursor is positioned at the first free 32-byte
+ * slot inside the existing LOSTCHN's cluster chain -- avoiding
+ * both the cost of init_dir_cluster on a fresh cluster and the
+ * pile-up of duplicate LOSTCHN entries in root that an earlier
+ * "always create new" policy was producing across runs.
+ *
+ * If the root has no free slot when we want to place the LOSTCHN
+ * entry (typical when a prior /F /C without LOSTCHN already filled
+ * root with FILE####.CHK), find_free_root_slot falls back to
+ * overwriting one such old FILE####.CHK entry: the displaced
+ * entry's chain becomes orphan and is reconverted on the next
+ * chkdsk run, while LOSTCHN gets a place to live. Any other
+ * failure (no free cluster, write error, or root genuinely full of
+ * non-CHK entries) is graceful -- one WARN, then CHK entries fall
+ * back to root for the rest of the sweep.
+ *
+ * Coherence with the batched FAT scan: fix_fat_set bypasses the
+ * WIN3 batch page; the main loop sees stale 0 bytes for any cluster
+ * we just allocated mid-batch, but since v==0 is treated as "free"
+ * (loop only acts on orphans), stale entries are silently skipped. */
+
+static u8    g_lnf_tried     = 0u;
+static DWORD g_lnf_first_clu = 0ul;     /* 0 = fallback to root */
+static DWORD g_lnf_cur_clu   = 0ul;
+static UINT  g_lnf_cur_sec   = 0u;
+static UINT  g_lnf_cur_off   = 0u;
+
+/* No phase4_lostchn_reset(): scan_run() is called once per program
+ * invocation, and the explicit `= 0` initialisers above land these
+ * in _INITIALIZED so gsinit gives them a clean starting state. */
+
+/* End-of-chain marker. fix_fat_set packs the value into 12/16/28
+ * bits per FAT type, so the same constant works on every layout. */
+#define LOSTCHN_EOC  0x0FFFFFFFul
+
+/* Forward-scan FAT for a free cluster (entry == 0), starting from
+ * cluster 2 every call. No hint optimisation: a previous version
+ * cached the last allocation in g_free_cluster_hint, but the value
+ * was observed corrupted in the field (hint = 0x2A41C26C with
+ * subsequent extends bailing out empty-handed) -- robustness > the
+ * O(n_fatent) speed-up. Per-extend cost on FAT16 32k-cluster: ~128
+ * cached sector loads, sub-second on Sprinter DSS. */
+static int find_free_fat_cluster(vol_t *fs, DWORD *out)
+{
+    DWORD c;
+    for (c = 2ul; c < fs->n_fatent; c++) {
+        DWORD v = chain_get_entry(fs, c);
+        if (v == CHAIN_READ_ERROR) return 0;
+        if (v == 0ul) {
+            *out = c;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Zero-fill all sectors of cluster `c`. Used directly for chain
+ * extension; init_dir_cluster() calls this then patches sector 0. */
+static int zero_cluster(vol_t *fs, DWORD c)
+{
+    LBA_t base = chain_cluster_to_lba(fs, c);
+    UINT  i;
+    memset(g_sect_a, 0, 512u);
+    for (i = 0u; i < (UINT)fs->csize; i++) {
+        if (!fix_write(base + (LBA_t)i, g_sect_a, 1u)) return 0;
+    }
+    return 1;
+}
+
+/* Initialize a fresh directory cluster: zero-fill, then patch `.`
+ * and `..` SFN entries into sector 0. ".." parent FstClus is fixed
+ * to 0 (LOSTCHN's parent is always root, per FAT spec ".." in a
+ * child of root encodes as FstClus = 0).
+ * Clobbers g_sect_a; caller chain_invalidate()s afterwards. */
+static int init_dir_cluster(vol_t *fs, DWORD c)
+{
+    LBA_t base = chain_cluster_to_lba(fs, c);
+    UINT  i;
+    BYTE *cb;
+
+    if (!zero_cluster(fs, c)) return 0;
+    /* zero_cluster left g_sect_a all-zero -- patch dots in place. */
+    g_sect_a[0] = '.';
+    for (i = 1u; i < 11u; i++) g_sect_a[i] = ' ';
+    g_sect_a[11] = ATTR_DIR_BYTE;
+    stamp_entry_dt(&g_sect_a[0]);
+    cb = (BYTE *)&c;
+    g_sect_a[20] = cb[2]; g_sect_a[21] = cb[3];
+    g_sect_a[26] = cb[0]; g_sect_a[27] = cb[1];
+    g_sect_a[32] = '.';
+    g_sect_a[33] = '.';
+    for (i = 34u; i < 43u; i++) g_sect_a[i] = ' ';
+    g_sect_a[43] = ATTR_DIR_BYTE;
+    stamp_entry_dt(&g_sect_a[32]);
+    return fix_write(base, g_sect_a, 1u);
+}
+
+/* Lazy-open LOSTCHN. First tries to reuse an existing LOSTCHN dir
+ * entry left over from a prior /F /C run -- positions the cursor at
+ * offset 64 of its first cluster (skipping `.`/`..`), so subsequent
+ * alloc_slot calls overwrite any stale FILE####.CHK entries inside.
+ * If none exists, creates a fresh one (alloc one FAT cluster, init
+ * `.`/`..`, write dir entry into root).
+ *
+ * Reuse skips the chain-walk-to-tail: stale FILE####.CHK entries
+ * inside an existing LOSTCHN are simply overwritten, leaving their
+ * old chains as orphans that the same /F /C sweep then converts.
+ *
+ * On any failure (no free cluster, root full, write error) we
+ * print one WARN and return 0; alloc_slot then falls back to
+ * writing CHK entries directly into root. */
+static int phase4_lostchn_open(vol_t *fs)
+{
+    DWORD newc;
+    LBA_t sect;
+    UINT  off, i;
+    BYTE *e, *cb;
+
+    g_lnf_tried = 1u;
+
+    /* Reuse an existing LOSTCHN if any. */
+    if (find_root_slot(fs, &sect, &off, ROOT_MATCH_LOSTCHN)) {
+        DWORD existing;
+        if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) goto fail;
+        existing = entry_first_cluster(&g_sect_a[off]);
+        if (existing >= 2ul && existing < fs->n_fatent) {
+            g_lnf_first_clu = existing;
+            g_lnf_cur_clu   = existing;
+            g_lnf_cur_sec   = 0u;
+            g_lnf_cur_off   = 64u;     /* skip `.`/`..` */
+            return 1;
+        }
+        /* corrupt cluster pointer in the existing entry -- fall
+         * through and create a new LOSTCHN; the bad entry stays. */
+    }
+
+    if (!find_free_fat_cluster(fs, &newc)) goto fail;
+    if (!fix_fat_set(fs, newc, LOSTCHN_EOC)) goto fail;
+    if (!init_dir_cluster(fs, newc)) goto fail;
+    if (!find_root_slot(fs, &sect, &off, ROOT_MATCH_FREE)
+        && !find_root_slot(fs, &sect, &off, ROOT_MATCH_CHK)) {
+        goto fail;
+    }
+    if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) goto fail;
+    e = &g_sect_a[off];
+    memcpy(e, LOSTCHN_SFN, 11u);
+    e[11] = ATTR_DIR_BYTE;
+    for (i = 12u; i < 32u; i++) e[i] = 0u;
+    stamp_entry_dt(e);
+    cb = (BYTE *)&newc;
+    e[20] = cb[2]; e[21] = cb[3];
+    e[26] = cb[0]; e[27] = cb[1];
+    if (!fix_write(sect, g_sect_a, 1u)) goto fail;
+
+    g_lnf_first_clu = newc;
+    g_lnf_cur_clu   = newc;
+    g_lnf_cur_sec   = 0u;
+    g_lnf_cur_off   = 64u;     /* skip `.`/`..` */
+    return 1;
+
+fail:
+    warn_str("LOSTCHN unavail");
+    return 0;
+}
+
+/* Allocate next slot (sect, off) for a CHK entry. Lazy-opens LOSTCHN
+ * on first call; falls back to root if LOSTCHN is unusable. Extends
+ * the LOSTCHN chain (alloc cluster + link + zero-fill) when the
+ * current cluster is exhausted. */
+static int phase4_lostchn_alloc_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
+{
+    char  xr   = '?';
+    DWORD newc = 0ul;
+
+    if (!g_lnf_tried) (void)phase4_lostchn_open(fs);
+
+    if (g_lnf_first_clu == 0ul) {
+        return find_free_root_slot(fs, out_sect, out_off);
+    }
+
+    /* Extend LOSTCHN chain when the current cluster is exhausted.
+     * Sub-code identifies which step failed:
+     *   f = find_free_fat_cluster (no free FAT entry left)
+     *   l = fix_fat_set linking current cluster to the new one
+     *   e = fix_fat_set writing EOC into the new cluster's entry
+     *   z = zero_cluster (data-area write failure mid-fill)
+     * No chain_invalidate() here: the phase 4 main loop already
+     * invalidates before every phase4_walk_chain call. */
+    if (g_lnf_cur_sec >= (UINT)fs->csize) {
+        if (!find_free_fat_cluster(fs, &newc))     { xr = 'f'; goto extend_fail; }
+        if (!fix_fat_set(fs, g_lnf_cur_clu, newc)) { xr = 'l'; goto extend_fail; }
+        if (!fix_fat_set(fs, newc, LOSTCHN_EOC))   { xr = 'e'; goto extend_fail; }
+        if (!zero_cluster(fs, newc))               { xr = 'z'; goto extend_fail; }
+        g_lnf_cur_clu = newc;
+        g_lnf_cur_sec = 0u;
+        g_lnf_cur_off = 0u;
+    }
+
+    *out_sect = chain_cluster_to_lba(fs, g_lnf_cur_clu) + (LBA_t)g_lnf_cur_sec;
+    *out_off  = (WORD)g_lnf_cur_off;
+    g_lnf_cur_off += 32u;
+    if (g_lnf_cur_off >= 512u) {
+        g_lnf_cur_off = 0u;
+        g_lnf_cur_sec++;
+    }
+    return 1;
+
+extend_fail:
+    fix_verbose_flush();
+    /* Format: "LCXx cu=N nc=N be=XX"
+     *   x  = which step (f/l/e/z)
+     *   cu = g_lnf_cur_clu (current LOSTCHN tail cluster)
+     *   nc = newc (cluster we tried to allocate; 0 if step f failed)
+     *   be = last BIOS error from disk_read/disk_write (hex) */
+    prt_str("  LCX");
+    prt_chr(xr);
+    prt_str(" fc=");
+    prt_dec((unsigned long)g_lnf_first_clu);
+    prt_str(" cu=");
+    prt_dec((unsigned long)g_lnf_cur_clu);
+    prt_str(" nc=");
+    prt_dec((unsigned long)newc);
+    prt_str(" be=");
+    prt_hex((unsigned long)diskio_dss_last_error(), 2u);
+    prt_nl();
+    g_lnf_first_clu = 0ul;
+    return find_free_root_slot(fs, out_sect, out_off);
+}
+
+/* ---------------------------------------------------------------- */
 
 /* Phase 4: lost cluster scan with two repair modes.
  *
  *   default /F: zero each orphan FAT entry in place (free).
  *   /F /C:      identify each orphan chain head and create a
- *               FILE####.CHK entry in the root pointing at it.
+ *               FILE####.CHK entry under LOSTCHN/ pointing at it.
  *
  * Bitmap state at entry: 1 = reachable from any directory entry
  * (set by walk_tree). For /CONVERT, a pre-pass marks orphan chain
@@ -797,6 +1110,7 @@ static int phase4_lost(vol_t *fs)
     prt_str("Phase 4: lost clusters\r\n");
 
     converting = fix_enabled() && fix_convert_enabled();
+    phase4_capture_now();
 
 #if CHKDSK_FAT12
     /* FAT12 has 1.5-byte entries that may straddle a sector boundary,
@@ -815,11 +1129,7 @@ static int phase4_lost(vol_t *fs)
                 DWORD v;
                 if (bitmap_get((u32)cc)) continue;
                 v = chain_get_entry(fs, cc);
-                if (v == CHAIN_READ_ERROR) {
-                    fix_verbose_flush();
-                    prt_str("  ERROR: FAT read failed\r\n");
-                    return -1;
-                }
+                if (v == CHAIN_READ_ERROR) { err_str("FAT read"); return -1; }
                 if (v < 2ul || v >= fs->n_fatent) continue;
                 if (chain_is_bad(fs, v)) continue;
                 bitmap_set((u32)v);
@@ -830,11 +1140,7 @@ static int phase4_lost(vol_t *fs)
             DWORD v;
             if (bitmap_get((u32)cc)) continue;
             v = chain_get_entry(fs, cc);
-            if (v == CHAIN_READ_ERROR) {
-                fix_verbose_flush();
-                prt_str("  ERROR: FAT read failed\r\n");
-                return -1;
-            }
+            if (v == CHAIN_READ_ERROR) { err_str("FAT read"); return -1; }
             if (v == 0ul || chain_is_bad(fs, v)) continue;
 
             if (converting) {
@@ -844,7 +1150,7 @@ static int phase4_lost(vol_t *fs)
                 BYTE  name[11];
                 if (chain_len == 0ul) {
                     /* defensive */
-                } else if (find_free_root_slot(fs, &e_sect, &e_off)) {
+                } else if (phase4_lostchn_alloc_slot(fs, &e_sect, &e_off)) {
                     DWORD cluster_bytes = (DWORD)fs->csize << 9;
                     format_chk_name(name, seq);
                     if (write_chk_entry(e_sect, e_off, name, cc,
@@ -853,23 +1159,18 @@ static int phase4_lost(vol_t *fs)
                         seq++;
                         lost_n += chain_len;
                     } else {
-                        fix_verbose_flush();
-                        prt_str("  WARN: write FILE entry failed\r\n");
+                        warn_str("FILE write");
                     }
                 } else {
                     fix_verbose_flush();
-                    prt_str("  WARN: root dir full; chain at cluster ");
+                    prt_str("  no slot c=");
                     prt_dec((unsigned long)cc);
-                    prt_str(" not converted\r\n");
+                    prt_nl();
                 }
                 chain_invalidate();
             } else {
                 if (fix_enabled()) {
-                    if (!fix_fat_set(fs, cc, 0ul)) {
-                        fix_verbose_flush();
-                        prt_str("  ERROR: FAT free failed\r\n");
-                        return -1;
-                    }
+                    if (!fix_fat_set(fs, cc, 0ul)) { err_str("FAT free"); return -1; }
                 }
                 lost_n++;
             }
@@ -891,94 +1192,189 @@ static int phase4_lost(vol_t *fs)
     fat1 = fs->fatbase;
     fat2 = fat1 + (LBA_t)fs->fsize;
 
+    /* Open one DSS page for batched FAT reads. Both the /CONVERT
+     * pre-pass and the main scan reuse the same page (one
+     * open/close, two passes through the FAT in 32-sector batches).
+     *
+     * Two notes on coherence in the main pass:
+     *  - chain.c's single-sector FAT cache (g_cached_sect / g_sect_a)
+     *    is invalidated before every chain walk: the previous orphan
+     *    iteration's find_free_root_slot/write_chk_entry may have
+     *    overwritten g_sect_a while leaving g_cached_sect stale.
+     *  - bios_drv_write may disturb the WIN3 mapping. After flushing
+     *    dirty FAT sectors we call diskio_batch_invalidate() so the
+     *    next batch_read re-issues dss_setwin_page. */
+    if (!diskio_batch_open(1u)) { err_str("no page"); return -1; }
+
     if (converting) {
         if (phase4_premark(fs, shift, n_per, bad_marker) < 0) {
-            fix_verbose_flush();
-            prt_str("  ERROR: pre-pass FAT read failed\r\n");
+            err_str("premark");
+            diskio_batch_close();
             return -1;
         }
     }
 
-    for (sec_idx = 0ul; sec_idx < fs->fsize; sec_idx++) {
-        DWORD start_c = (shift == 2u) ? (sec_idx << 7) : (sec_idx << 8);
-        if ((sec_idx & 0x0Ful) == 0ul) fix_verbose_tick();
-        UINT  cc_in;
-        int   dirty = 0;
+    sec_idx = 0ul;
+    while (sec_idx < fs->fsize) {
+        DWORD remaining = fs->fsize - sec_idx;
+        u8    batch     = (remaining > BATCH_SECTORS_PER_PAGE)
+                          ? (u8)BATCH_SECTORS_PER_PAGE
+                          : (u8)remaining;
+        u8   *page;
+        u8    si;
+        unsigned long dirty_mask = 0ul;
 
-        if (start_c >= fs->n_fatent) break;
+        fix_verbose_tick();
 
-        if (disk_read(0u, g_sect_a, fat1 + (LBA_t)sec_idx, 1u) != RES_OK) {
-            fix_verbose_flush();
-            prt_str("  ERROR: FAT read failed\r\n");
+        if (!diskio_batch_read((unsigned long)(fat1 + (LBA_t)sec_idx),
+                               batch, 0u)) {
+            err_str("FAT batch");
+            diskio_batch_close();
             return -1;
         }
-        chain_invalidate();
+        page = diskio_batch_map(0u);
 
-        for (cc_in = 0u; cc_in < n_per; cc_in++) {
-            DWORD cc  = start_c + (DWORD)cc_in;
-            UINT  pos = cc_in << shift;
-            DWORD v;
+        for (si = 0u; si < batch; si++) {
+            DWORD this_sec = sec_idx + (DWORD)si;
+            DWORD start_c  = (shift == 2u) ? (this_sec << 7)
+                                           : (this_sec << 8);
+            const u8 *sec_buf = page + (UINT)si * 512u;
+            u8       *sec_buf_w = page + (UINT)si * 512u;
+            UINT      cc_in;
 
-            if (cc < 2ul || cc >= fs->n_fatent) continue;
-            if (bitmap_get((u32)cc)) continue;
-            v = read_fat_entry_in_buf(pos, shift);
-            if (v == 0ul || v == bad_marker) continue;
+            if (start_c >= fs->n_fatent) break;
 
-            if (converting) {
-                /* cc is a chain head. Walk it (clobbers g_sect_a),
-                 * write FILE####.CHK entry, restore FAT sector. */
-                DWORD chain_len = phase4_walk_chain(fs, cc);
-                LBA_t e_sect;
-                WORD  e_off;
-                BYTE  name[11];
-                if (chain_len == 0ul) {
-                    /* re-read the FAT sector and continue */
-                } else if (find_free_root_slot(fs, &e_sect, &e_off)) {
-                    DWORD cluster_bytes = (DWORD)fs->csize << 9;
-                    format_chk_name(name, seq);
-                    if (write_chk_entry(e_sect, e_off, name, cc,
-                                        chain_len * cluster_bytes)) {
-                        chain_n++;
-                        seq++;
-                        lost_n += chain_len;
+            for (cc_in = 0u; cc_in < n_per; cc_in++) {
+                DWORD cc  = start_c + (DWORD)cc_in;
+                UINT  pos = cc_in << shift;
+                DWORD v;
+
+                if (cc < 2ul || cc >= fs->n_fatent) continue;
+                if (bitmap_get((u32)cc)) continue;
+                v = read_fat_entry_in_buf(sec_buf, pos, shift);
+                if (v == 0ul || v == bad_marker) continue;
+
+                if (converting) {
+                    /* cc is an orphan chain head. Walk + create
+                     * FILE####.CHK in the root. The helpers use
+                     * g_sect_a (disjoint from the WIN3 batch page),
+                     * so the FAT data we are scanning stays intact
+                     * -- no FAT re-read needed. */
+                    DWORD chain_len;
+                    LBA_t e_sect;
+                    WORD  e_off;
+                    BYTE  name[11];
+
+                    chain_invalidate();
+                    chain_len = phase4_walk_chain(fs, cc);
+
+                    if (chain_len == 0ul) {
+                        /* defensive: cycle protection in walker */
+                    } else if (phase4_lostchn_alloc_slot(fs, &e_sect, &e_off)) {
+                        DWORD cluster_bytes = (DWORD)fs->csize << 9;
+                        format_chk_name(name, seq);
+                        if (write_chk_entry(e_sect, e_off, name, cc,
+                                            chain_len * cluster_bytes)) {
+                            chain_n++;
+                            seq++;
+                            lost_n += chain_len;
+                        } else {
+                            /* Diagnostic: dump the target sector + offset
+                             * + BIOS error. We need to see WHY writes are
+                             * failing in the field -- the cascade in
+                             * earlier runs gave no actionable info. */
+                            fix_verbose_flush();
+                            prt_str("  Wf s=");
+                            prt_dec((unsigned long)e_sect);
+                            prt_str(" o=");
+                            prt_dec((unsigned long)e_off);
+                            prt_str(" cu=");
+                            prt_dec((unsigned long)g_lnf_cur_clu);
+                            prt_str(" be=");
+                            prt_hex((unsigned long)diskio_dss_last_error(), 2u);
+                            prt_nl();
+                        }
                     } else {
+                        /* No slot available -- print short note and
+                         * give the user a chance to abort the spam.
+                         * Accepts ESC and Ctrl+C. Ctrl+C is detected
+                         * three ways:
+                         *   raw ascii 0x03 (LAT-mode keymap),
+                         *   modifier+letter ('C'/'c' with CTRL bit),
+                         *   modifier+scan-code 0x2C (RUS-mode keymap,
+                         *     where the letter key produces ascii=0
+                         *     and the position code identifies it --
+                         *     same pattern as utils/diff with Z=0x2A,
+                         *     X=0x2B; C is the next bottom-row key). */
                         fix_verbose_flush();
-                        prt_str("  WARN: write FILE entry failed\r\n");
+                        prt_str("  no slot c=");
+                        prt_dec((unsigned long)cc);
+                        prt_nl();
+                        if (dss_kbhit()) {
+                            dss_key_t k;
+                            dss_waitkey_ex(&k);
+                            if (k.ascii == 27u || k.ascii == 0x03u
+                                || ((k.modifiers & DSS_KEYMOD_CTRL)
+                                    && (k.ascii == 'C' || k.ascii == 'c'
+                                     || k.scan == 0x2Cu))) {
+                                prt_str("  aborted\r\n");
+                                diskio_batch_close();
+                                return -1;
+                            }
+                        }
                     }
                 } else {
-                    fix_verbose_flush();
-                    prt_str("  WARN: root dir full; chain at cluster ");
-                    prt_dec((unsigned long)cc);
-                    prt_str(" not converted\r\n");
-                }
-                /* Restore FAT 1 sector for the outer loop. */
-                if (disk_read(0u, g_sect_a, fat1 + (LBA_t)sec_idx, 1u) != RES_OK) {
-                    fix_verbose_flush();
-                    prt_str("  ERROR: FAT re-read failed\r\n");
-                    return -1;
-                }
-                chain_invalidate();
-            } else {
-                /* Free mode: zero entry in the loaded buffer. */
-                if (fix_enabled()) {
-                    g_sect_a[pos]      = 0u;
-                    g_sect_a[pos + 1u] = 0u;
-                    if (shift == 2u) {
-                        g_sect_a[pos + 2u]  = 0u;
-                        g_sect_a[pos + 3u] &= 0xF0u;
+                    /* Free mode: zero entry in the batch page; the
+                     * sector will be flushed at end of batch. */
+                    if (fix_enabled()) {
+                        sec_buf_w[pos]      = 0u;
+                        sec_buf_w[pos + 1u] = 0u;
+                        if (shift == 2u) {
+                            sec_buf_w[pos + 2u]  = 0u;
+                            sec_buf_w[pos + 3u] &= 0xF0u;
+                        }
+                        dirty_mask |= (1ul << si);
                     }
-                    dirty = 1;
+                    lost_n++;
                 }
-                lost_n++;
             }
         }
 
-        if (dirty) {
-            if (!fix_write(fat1 + (LBA_t)sec_idx, g_sect_a, 1u)) return -1;
-            if (fs->n_fats == 2u
-                && !fix_write(fat2 + (LBA_t)sec_idx, g_sect_a, 1u)) return -1;
+        /* Flush dirty FAT sectors. Copy each to g_sect_a first so the
+         * write reads from a stable buffer (bios_drv_write may move
+         * WIN3 from under us mid-loop). After all writes we tell the
+         * batch layer the WIN3 mapping is unknown so the next
+         * batch_read re-maps the page. */
+        if (dirty_mask != 0ul) {
+            for (si = 0u; si < batch; si++) {
+                if ((dirty_mask & (1ul << si)) == 0ul) continue;
+                /* Re-map fresh in case a previous iteration's
+                 * disk_write disturbed WIN3. */
+                diskio_batch_invalidate();
+                page = diskio_batch_map(0u);
+                {
+                    UINT k;
+                    const u8 *src = page + (UINT)si * 512u;
+                    for (k = 0u; k < 512u; k++) g_sect_a[k] = src[k];
+                }
+                if (!fix_write(fat1 + (LBA_t)sec_idx + (LBA_t)si,
+                               g_sect_a, 1u)) {
+                    diskio_batch_close();
+                    return -1;
+                }
+                if (fs->n_fats == 2u
+                    && !fix_write(fat2 + (LBA_t)sec_idx + (LBA_t)si,
+                                  g_sect_a, 1u)) {
+                    diskio_batch_close();
+                    return -1;
+                }
+            }
+            diskio_batch_invalidate();
         }
+
+        sec_idx += (DWORD)batch;
     }
+    diskio_batch_close();
     fix_verbose_flush();
 
 phase4_report:
