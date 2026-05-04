@@ -9,6 +9,7 @@
 #include "vol.h"
 #include "diskio.h"
 #include "sectbuf.h"
+#include "chain.h"
 #include "prt.h"
 #include "fix.h"
 
@@ -59,6 +60,18 @@ int fix_fat_set(vol_t *fs, DWORD clust, DWORD value)
     const BYTE *vb = (const BYTE *)&value;
 
     if (!g_fix_enabled) return 1;
+
+    /* CRITICAL: this function does read-modify-write on g_sect_a, which
+     * chain.c also uses as its FAT-sector cache via g_cached_sect.
+     * Without invalidating chain.c's cache, a subsequent chain_get_entry()
+     * can hit a stale `g_cached_sect == X` while g_sect_a actually holds
+     * a different sector's bytes -- returning garbage as the FAT entry.
+     * That bug cascaded into find_free_fat_cluster() returning clusters
+     * already in use, so /F /C clobbered existing directories with
+     * LOSTCHN/FILE####.CHK content. Invalidate up front so chain.c
+     * re-reads from disk on its next call regardless of which path we
+     * take through this function. */
+    chain_invalidate();
 
 #if CHKDSK_FAT12
     if (fs->fs_type == FS_FAT12) {
@@ -142,6 +155,8 @@ int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
     const BYTE *vb = (const BYTE *)&value;  /* SDCC z80 stores LSB first */
 
     if (!g_fix_enabled) return 1;
+    /* See fix_fat_set for why this is required. */
+    chain_invalidate();
     if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
     switch (kind) {
     case FIX_DPATCH_DELETE:

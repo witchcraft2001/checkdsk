@@ -12,6 +12,7 @@
 #include "diskio.h"
 #include "diskio_dss.h"
 #include "diskio_batch.h"
+#include "bitmap.h"
 
 #define BATCH_WINDOW   3u           /* WIN3 = 0xC000..0xFFFF */
 #define BATCH_WIN_BASE 0xC000u
@@ -62,6 +63,10 @@ u8 *diskio_batch_map(u8 page_idx)
     if (page_idx != g_cur_page) {
         dss_setwin_page(BATCH_WINDOW, g_block, page_idx);
         g_cur_page = page_idx;
+        /* WIN3 now has a batch page. bitmap shares WIN3 too -- it must
+         * re-map on its next access, otherwise its bitmap_get reads from
+         * batch FAT data and returns wrong reachability bits. */
+        bitmap_invalidate();
     }
     return (u8 *)BATCH_WIN_BASE;
 }

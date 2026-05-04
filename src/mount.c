@@ -21,7 +21,9 @@
 #include "diskio.h"
 #include "sectbuf.h"
 
-static WORD ld_w(const BYTE *p)
+/* Shared LE byte loaders -- declared in vol.h, used by mount/bpb/fat/
+ * dirent. One global copy instead of four static copies. */
+WORD vol_ld_w(const BYTE *p)
 {
     WORD x;
     BYTE *xb = (BYTE *)&x;
@@ -29,7 +31,7 @@ static WORD ld_w(const BYTE *p)
     return x;
 }
 
-static DWORD ld_d(const BYTE *p)
+DWORD vol_ld_d(const BYTE *p)
 {
     DWORD x;
     BYTE *xb = (BYTE *)&x;
@@ -37,8 +39,8 @@ static DWORD ld_d(const BYTE *p)
     return x;
 }
 
-#define LD_W(p, o)  ld_w((p) + (o))
-#define LD_D(p, o)  ld_d((p) + (o))
+#define LD_W(p, o)  vol_ld_w((p) + (o))
+#define LD_D(p, o)  vol_ld_d((p) + (o))
 
 static int is_pow2(WORD v)
 {
@@ -55,7 +57,7 @@ int vol_mount(vol_t *v, BYTE pdrv)
 {
     BYTE  *vbr;
     WORD   bps, rsvd, n_root, totsec16, fatsz16;
-    BYTE   spc, n_fats;
+    BYTE   spc, n_fats, spc_shift;
     DWORD  totsec32, fatsz32, totsec, fatsz;
     DWORD  root_sectors, data_sectors, count_clust, fat_total;
 
@@ -80,21 +82,30 @@ int vol_mount(vol_t *v, BYTE pdrv)
     if (n_fats == 0u || n_fats > 2u)     return VOL_E_BAD_BPB;
     if (rsvd == 0u)                      return VOL_E_BAD_BPB;
 
+    /* spc is power of two in [1..128] -- compute log2 once, then use
+     * shifts everywhere instead of 32-bit *spc / /spc. Lets the linker
+     * drop _mullong/_divulong/_modulong from _HOME entirely. */
+    {
+        BYTE s = spc;
+        spc_shift = 0u;
+        while ((s >>= 1) != 0u) spc_shift++;
+    }
+
     fatsz  = (fatsz16 != 0u)  ? (DWORD)fatsz16  : fatsz32;
     totsec = (totsec16 != 0u) ? (DWORD)totsec16 : totsec32;
     if (fatsz == 0u || totsec == 0u)     return VOL_E_BAD_BPB;
 
-    /* Root dir occupies ceil(n_root * 32 / bps) sectors; bps == 512 so
-     * the divisor is constant. n_root <= 0xFFFF so n_root * 32 fits in
-     * 21 bits -- WORD shift is enough. */
-    root_sectors = (((DWORD)n_root << 5) + (DWORD)bps - 1ul) / (DWORD)bps;
+    /* Root dir occupies ceil(n_root * 32 / bps) sectors. bps == 512
+     * (validated above), so this reduces to ceil(n_root / 16) =
+     * (n_root + 15) >> 4 -- 16-bit math, no math runtime pulled. */
+    root_sectors = (DWORD)(WORD)((n_root + 15u) >> 4);
 
-    /* fat_total = n_fats * fatsz, but n_fats is 1 or 2: avoid __mullong. */
+    /* fat_total = n_fats * fatsz, but n_fats is 1 or 2: avoid _mullong. */
     fat_total = (n_fats == 2u) ? (fatsz << 1) : fatsz;
 
     if (totsec <= ((DWORD)rsvd + fat_total + root_sectors)) return VOL_E_BAD_BPB;
     data_sectors = totsec - ((DWORD)rsvd + fat_total + root_sectors);
-    count_clust  = data_sectors / (DWORD)spc;
+    count_clust  = data_sectors >> spc_shift;
 
     if (count_clust < 4085ul) {
 #if CHKDSK_FAT12
@@ -121,6 +132,7 @@ int vol_mount(vol_t *v, BYTE pdrv)
 
     v->n_fats      = n_fats;
     v->csize       = (WORD)spc;
+    v->csize_shift = spc_shift;
     v->n_rootdir   = n_root;
     v->n_fatent    = count_clust + 2ul;
     v->fsize       = fatsz;

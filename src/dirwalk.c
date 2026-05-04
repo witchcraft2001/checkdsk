@@ -66,22 +66,29 @@ void dirwalk_last_entry_location(const dirwalk_t *w,
 }
 
 /* Load the sector at w->cur_sect into g_sect_a, advance bookkeeping.
- * Returns 1 ok, -1 on I/O error. */
+ * Returns 1 ok, -1 on I/O error.
+ *
+ * Chain-based walks (cluster != 0 -- FAT32 root, every subdir on every
+ * FAT type) decrement cluster_sects_left so the caller can switch to
+ * the next cluster on the FAT chain at the boundary. The fixed-area
+ * FAT12/16 root has cluster == 0 and pages by entries_left instead. */
 static int load_dir_sector(dirwalk_t *w)
 {
     if (disk_read(0u, g_sect_a, w->cur_sect, 1u) != RES_OK) return -1;
     chain_invalidate();   /* g_sect_a no longer holds a FAT sector */
     w->cur_sect++;
-    if (w->fs->fs_type == FS_FAT32 && w->cluster_sects_left > 0u) {
+    if (w->cluster != 0ul && w->cluster_sects_left > 0u) {
         w->cluster_sects_left--;
     }
     w->sect_off = 0u;
     return 1;
 }
 
-/* Cluster boundary on FAT32 -- follow the chain to the next cluster.
- * Returns 1 if a fresh cluster is now staged in cur_sect/cluster_sects_left,
- * 0 on EOC (end of directory), -1 on error. */
+/* Cluster boundary -- follow the FAT chain to the next cluster.
+ * Used for any chain-based walk (FAT32 root, every subdir on every
+ * FAT type). Returns 1 if a fresh cluster is now staged in
+ * cur_sect/cluster_sects_left, 0 on EOC (end of directory),
+ * -1 on error. */
 static int advance_cluster(dirwalk_t *w)
 {
     DWORD next;
@@ -117,7 +124,14 @@ int dirwalk_next(dirwalk_t *w, BYTE **out_entry)
 
     while (w->entries_left > 0ul) {
         if (w->sect_off >= SECTOR_SIZE) {
-            if (w->fs->fs_type == FS_FAT32 && w->cluster_sects_left == 0u) {
+            /* Cluster boundary on any chain-based walk (FAT32 root or
+             * any subdir on any FAT type). Without this, FAT16/12
+             * multi-cluster subdirs walked linearly past their first
+             * cluster, parsing adjacent on-disk data as 32-byte
+             * entries -- producing spurious child-cluster references
+             * and inflating phase-3 reach (or, on /F, corrupting
+             * unrelated content). */
+            if (w->cluster != 0ul && w->cluster_sects_left == 0u) {
                 rc = advance_cluster(w);
                 if (rc <= 0) { w->end_seen = 1u; return rc; }
             }

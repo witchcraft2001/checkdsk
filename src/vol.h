@@ -40,6 +40,9 @@ typedef struct {
     BYTE  fs_type;       /* FS_FAT12 / 16 / 32, 0 if not mounted */
     BYTE  n_fats;        /* 1 or 2 */
     WORD  csize;         /* sectors per cluster (power of two) */
+    BYTE  csize_shift;   /* log2(csize) -- used to replace 32-bit *csize/csize
+                          * with shifts so SDCC's _mullong/_divulong/_modulong
+                          * don't get linked into _HOME (saves ~490 B). */
     WORD  n_rootdir;     /* root dir entry count (FAT12/16); 0 for FAT32 */
     DWORD n_fatent;      /* FAT entries = max_clust + 2 */
     DWORD fsize;         /* sectors per FAT */
@@ -50,6 +53,12 @@ typedef struct {
     DWORD n_total_sec;   /* BPB total sectors */
     LBA_t fsi_sector;    /* FAT32 FSInfo sector LBA, 0 on FAT12/16 */
 } vol_t;
+
+/* Little-endian byte loaders shared across mount/bpb/fat/dirent.
+ * Implemented once in mount.c so the linker emits one copy instead
+ * of four. Saves ~150 B vs the old per-module static helpers. */
+WORD  vol_ld_w(const BYTE *p);
+DWORD vol_ld_d(const BYTE *p);
 
 /* Backwards-compatible alias for code paths still using FATFS naming.
  * New code should prefer vol_t directly. */

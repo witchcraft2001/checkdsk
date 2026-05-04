@@ -39,7 +39,7 @@ CRT0       = $(SDK_DIR)build/crt0.rel
 SPRLIB     = $(SDK_DIR)build/sprinter.lib
 
 SDCC_TARGET = -mz80
-SDCC_FLAGS  = $(SDCC_TARGET) --max-allocs-per-node 5000 --opt-code-speed
+SDCC_FLAGS  = $(SDCC_TARGET) --max-allocs-per-node 5000 --opt-code-size
 
 # ----- Top-level dispatch (when invoked without APP=...) -----
 
@@ -110,7 +110,7 @@ $(BUILD)/%.rel: %.c | $(BUILD)
 $(BUILD)/$(APP).ihx: $(CRT0) $(SPRLIB) $(APP_RELS)
 	$(SDCC) $(SDCC_TARGET) --no-std-crt0 \
 		--code-loc $(CODE_LOC) --data-loc $(DATA_LOC) \
-		--max-allocs-per-node 5000 --opt-code-speed \
+		--max-allocs-per-node 5000 --opt-code-size \
 		$(INC) \
 		$(CRT0) $(APP_RELS) \
 		-l$(SPRLIB) \

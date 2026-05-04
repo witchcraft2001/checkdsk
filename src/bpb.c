@@ -32,19 +32,8 @@ static unsigned long sec_sum(const u8 *p)
     return s;
 }
 
-static u16 ld_word(const BYTE *p, UINT off)
-{
-    return (u16)(p[off] | ((u16)p[off + 1] << 8));
-}
-
-static unsigned long ld_dword(const BYTE *p, UINT off)
-{
-    unsigned long x;
-    BYTE *xb = (BYTE *)&x;
-    xb[0] = p[off];     xb[1] = p[off + 1];
-    xb[2] = p[off + 2]; xb[3] = p[off + 3];
-    return x;
-}
+#define ld_word(p, off)  ((u16)vol_ld_w((p) + (off)))
+#define ld_dword(p, off) ((unsigned long)vol_ld_d((p) + (off)))
 
 static const char *type_name(BYTE fs_type)
 {

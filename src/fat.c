@@ -42,13 +42,7 @@ static unsigned long sec_sum(const u8 *p)
 
 #define MAX_DETAIL 3
 
-static unsigned long ld_dword(const BYTE *p)
-{
-    unsigned long x;
-    BYTE *xb = (BYTE *)&x;
-    xb[0] = p[0]; xb[1] = p[1]; xb[2] = p[2]; xb[3] = p[3];
-    return x;
-}
+#define ld_dword(p) ((unsigned long)vol_ld_d(p))
 
 static void fat_err(const char *msg, int *errs)
 {
@@ -299,8 +293,9 @@ static int   *g_fat12_errs       = (int *)0;
 
 static u8 fat12_read_byte(unsigned long pos)
 {
-    LBA_t sec = g_fat12_fat_lba + (LBA_t)(pos / SECTOR_SIZE);
-    UINT  off = (UINT)(pos % SECTOR_SIZE);
+    /* SECTOR_SIZE is 512 -- shift/mask, no _divulong/_modulong. */
+    LBA_t sec = g_fat12_fat_lba + (LBA_t)(pos >> 9);
+    UINT  off = (UINT)(pos & 0x1FFul);
     if (sec != g_fat12_cached_sec) {
         if (disk_read(0, g_fat_a, sec, 1) != RES_OK) {
             fat_err("FAT 1 read failed (FAT12)", g_fat12_errs);

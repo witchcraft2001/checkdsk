@@ -43,4 +43,9 @@ u8   bitmap_test_and_set(u32 idx);
 /* Zero every byte in every allocated page. */
 void bitmap_clear_all(void);
 
+/* Forget the cached "WIN3 currently has bitmap page X" state. Call after
+ * any external code (e.g. diskio_batch) that may have re-mapped WIN3 to
+ * its own pages, so the next bitmap access re-issues dss_setwin_page. */
+void bitmap_invalidate(void);
+
 #endif /* CHKDSK_BITMAP_H */

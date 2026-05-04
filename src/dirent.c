@@ -43,18 +43,8 @@ static int is_forbidden_sfn_char(BYTE c)
     }
 }
 
-static DWORD ld_dword_le(const BYTE *p)
-{
-    DWORD x;
-    BYTE *xb = (BYTE *)&x;
-    xb[0] = p[0]; xb[1] = p[1]; xb[2] = p[2]; xb[3] = p[3];
-    return x;
-}
-
-static WORD ld_word_le(const BYTE *p)
-{
-    return (WORD)((WORD)p[0] | ((WORD)p[1] << 8));
-}
+#define ld_dword_le(p) vol_ld_d(p)
+#define ld_word_le(p)  vol_ld_w(p)
 
 UINT dirent_validate(vol_t *fs, const BYTE *e)
 {
@@ -122,14 +112,21 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
 
 void dirent_flags_print(UINT flags)
 {
+    /* Table-driven: one loop, ~30 B vs N if-prt_str pairs. */
+    static const struct { UINT mask; const char *s; } tbl[] = {
+        { DE_NAME_BAD_CHAR,    " bad-name" },
+        { DE_NAME_LOWERCASE,   " lower" },
+        { DE_NAME_LEAD_SPACE,  " lead-sp" },
+        { DE_ATTR_RESERVED,    " attr-rsv" },
+        { DE_DIR_NONZERO_SIZE, " dir-size" },
+        { DE_VOL_NONZERO,      " vol-nz" },
+        { DE_LFN_BAD,          " lfn-bad" },
+        { DE_CLUST_OOR,        " clust-oor" },
+        { DE_FAT16_HI_CLUST,   " fat16-hi" }
+    };
+    UINT i;
     if (flags == 0u) return;
-    if (flags & DE_NAME_BAD_CHAR)    prt_str(" bad-name");
-    if (flags & DE_NAME_LOWERCASE)   prt_str(" lower");
-    if (flags & DE_NAME_LEAD_SPACE)  prt_str(" lead-sp");
-    if (flags & DE_ATTR_RESERVED)    prt_str(" attr-rsv");
-    if (flags & DE_DIR_NONZERO_SIZE) prt_str(" dir-size");
-    if (flags & DE_VOL_NONZERO)      prt_str(" vol-nz");
-    if (flags & DE_LFN_BAD)          prt_str(" lfn-bad");
-    if (flags & DE_CLUST_OOR)        prt_str(" clust-oor");
-    if (flags & DE_FAT16_HI_CLUST)   prt_str(" fat16-hi");
+    for (i = 0u; i < sizeof(tbl)/sizeof(tbl[0]); i++) {
+        if (flags & tbl[i].mask) prt_str(tbl[i].s);
+    }
 }

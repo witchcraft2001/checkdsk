@@ -26,7 +26,9 @@ void chain_invalidate(void)
 
 LBA_t chain_cluster_to_lba(vol_t *fs, DWORD clust)
 {
-    return (LBA_t)(fs->database + (LBA_t)(clust - 2ul) * (LBA_t)fs->csize);
+    /* csize is power of two -- shift instead of 32-bit multiply so
+     * _mullong stays out of _HOME. */
+    return (LBA_t)(fs->database + ((LBA_t)(clust - 2ul) << fs->csize_shift));
 }
 
 /* Returns 1 on success, 0 on read error. The buffer is g_sect_a. */

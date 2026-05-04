@@ -265,13 +265,25 @@ static UINT walk_chain(vol_t *fs, DWORD start, DWORD *len_out)
 
 static void print_cw_tags(UINT cflags)
 {
-    if (cflags & CW_CYCLE)        prt_str(" cycle");
-    else if (cflags & CW_CROSS)   prt_str(" cross-link");
-    if (cflags & CW_BAD)          prt_str(" bad-cluster");
-    else if (cflags & CW_BROKEN)  prt_str(" broken");
-    if (cflags & CW_IO_ERR)       prt_str(" io-err");
-    if (cflags & CW_TRUNCATED)    prt_str(" truncated");
-    if (cflags & CW_EXCESS)       prt_str(" excess");
+    /* Table-driven so the bit-test+print pattern compiles to one
+     * loop instead of N separate if-prt_str pairs. CYCLE shadows
+     * CROSS and BAD shadows BROKEN -- masks are arranged so that
+     * once CYCLE/BAD are emitted we mask their alternate. */
+    static const struct { UINT mask; const char *s; } tbl[] = {
+        { CW_CYCLE,     " cycle" },
+        { CW_CROSS,     " cross-link" },
+        { CW_BAD,       " bad-cluster" },
+        { CW_BROKEN,    " broken" },
+        { CW_IO_ERR,    " io-err" },
+        { CW_TRUNCATED, " truncated" },
+        { CW_EXCESS,    " excess" }
+    };
+    UINT i;
+    if (cflags & CW_CYCLE) cflags &= (UINT)~CW_CROSS;
+    if (cflags & CW_BAD)   cflags &= (UINT)~CW_BROKEN;
+    for (i = 0u; i < sizeof(tbl)/sizeof(tbl[0]); i++) {
+        if (cflags & tbl[i].mask) prt_str(tbl[i].s);
+    }
 }
 
 /* Emit "  /A/B/NAME.EXT" -- the full path of a flagged entry. */
@@ -399,8 +411,12 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
 
         if (is_file && size != 0ul
             && (cflags & (CW_BROKEN | CW_BAD | CW_IO_ERR | CW_CYCLE | CW_CROSS)) == 0u) {
-            DWORD cluster_bytes = (DWORD)fs->csize << 9;
-            DWORD expected      = (size + cluster_bytes - 1ul) / cluster_bytes;
+            /* expected = ceil(size / cluster_bytes), where
+             * cluster_bytes = csize << 9 = 1 << (csize_shift+9).
+             * Use shift+mask to dodge _divulong/_modulong. */
+            BYTE  cl_sh = (BYTE)(fs->csize_shift + 9u);
+            DWORD mask  = ((DWORD)1ul << cl_sh) - 1ul;
+            DWORD expected = (size + mask) >> cl_sh;
             if (chain_len < expected)      cflags |= CW_TRUNCATED;
             else if (chain_len > expected) cflags |= CW_EXCESS;
         }
@@ -459,7 +475,27 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         }
     }
 
-    if (cflags & CW_CYCLE)     { t->cycles++;         fix_count_found(); }
+    if (cflags & CW_CYCLE) {
+        t->cycles++;
+        fix_count_found();
+        /* Cycle on the head cluster means another dirent already
+         * claims the same first cluster; the duplicate is dead weight
+         * (and on a /F /C run from a buggy older build, points back
+         * into LOSTCHN itself). Delete the duplicate dirent on /F so
+         * a follow-up sweep reports a clean tree. Skip for ATTR_DIR:
+         * removing one of two dir entries that share a cluster is
+         * fine, but we limit this repair to regular files to avoid
+         * surprises on legitimate aliasing patterns. */
+        if (is_file && fix_enabled()) {
+            LBA_t sect; WORD off;
+            dirwalk_last_entry_location(&frame->walker, &sect, &off);
+            if (fix_dir_patch(sect, off, FIX_DPATCH_DELETE, 0ul)) {
+                dirwalk_buffer_dirty(&frame->walker);
+            } else {
+                warn_str("cycle-del");
+            }
+        }
+    }
     if (cflags & CW_CROSS)     { t->cross_links++;    fix_count_found(); }
     if (cflags & CW_BROKEN)    { t->broken_chains++;  fix_count_found(); }
     if (cflags & CW_TRUNCATED) { t->truncated++;      fix_count_found(); }
@@ -472,8 +508,9 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
      * another file). */
     if (is_file && size != 0ul && chain_len != 0ul
         && (cflags & (CW_BROKEN | CW_BAD | CW_TRUNCATED | CW_CROSS)) != 0u) {
-        DWORD cluster_bytes  = (DWORD)fs->csize << 9;
-        DWORD chain_capacity = chain_len * cluster_bytes;
+        /* chain_capacity = chain_len * cluster_bytes; cluster_bytes is
+         * a power of two so this is a shift, no _mullong. */
+        DWORD chain_capacity = chain_len << (fs->csize_shift + 9u);
         if (size > chain_capacity) {
             LBA_t sect; WORD off;
             dirwalk_last_entry_location(&frame->walker, &sect, &off);
@@ -493,8 +530,9 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
      * n_fats == 2. The whole truncate+free counts as one fix. */
     if (is_file && (cflags & CW_EXCESS) != 0u && fix_enabled()
         && size != 0ul && clust >= 2ul && clust < fs->n_fatent) {
-        DWORD cluster_bytes = (DWORD)fs->csize << 9;
-        DWORD expected = (size + cluster_bytes - 1ul) / cluster_bytes;
+        BYTE  cl_sh = (BYTE)(fs->csize_shift + 9u);
+        DWORD mask  = ((DWORD)1ul << cl_sh) - 1ul;
+        DWORD expected = (size + mask) >> cl_sh;
         DWORD eoc = (fs->fs_type == FS_FAT32) ? 0x0FFFFFFFul : 0xFFFFul;
         DWORD c   = clust;
         DWORD i;
@@ -649,9 +687,16 @@ static int phase4_premark(vol_t *fs, UINT shift, UINT n_per, DWORD bad)
                 DWORD cc = start_c + (DWORD)cc_in;
                 DWORD v;
                 if (cc < 2ul || cc >= fs->n_fatent) continue;
-                if (bitmap_get((u32)cc)) continue;
+                /* Re-establish WIN3 = batch page in case the previous
+                 * iteration's bitmap_get/set re-mapped it to bitmap.
+                 * No-op when already on the batch page. Skipping this
+                 * caused read_fat_entry_in_buf to read bitmap memory
+                 * as FAT entries -- corrupting premark and producing
+                 * stale orphan detection. */
+                (void)diskio_batch_map(0u);
                 v = read_fat_entry_in_buf(sec_buf, cc_in << shift, shift);
                 if (v < 2ul || v >= fs->n_fatent || v == bad) continue;
+                if (bitmap_get((u32)cc)) continue;
                 bitmap_set((u32)v);
             }
         }
@@ -678,14 +723,17 @@ static DWORD phase4_walk_chain(vol_t *fs, DWORD c)
     return len;
 }
 
-/* Format "FILE####" + "CHK" into 11 raw SFN bytes. seq up to 9999. */
+/* Format "FILE####" + "CHK" into 11 raw SFN bytes. seq up to 9999.
+ * Truncate to 16 bits so the digit extraction stays on _divuint (small)
+ * and _divulong is not pulled into _HOME for the whole binary. */
 static void format_chk_name(BYTE *out11, DWORD seq)
 {
+    WORD s = (WORD)seq;
     UINT i;
     out11[0] = 'F'; out11[1] = 'I'; out11[2] = 'L'; out11[3] = 'E';
     for (i = 0u; i < 4u; i++) {
-        out11[7u - i] = (BYTE)('0' + (BYTE)(seq % 10ul));
-        seq /= 10ul;
+        out11[7u - i] = (BYTE)('0' + (BYTE)(s % 10u));
+        s = (WORD)(s / 10u);
     }
     out11[8] = 'C'; out11[9] = 'H'; out11[10] = 'K';
 }
@@ -707,6 +755,9 @@ static void format_chk_name(BYTE *out11, DWORD seq)
  * mode is meaningless there). */
 static int find_root_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off, int mode)
 {
+    /* Reads root-dir sectors into g_sect_a, which is also chain.c's FAT
+     * cache. Invalidate so chain.c re-reads on its next call. */
+    chain_invalidate();
 #if CHKDSK_FAT12 || CHKDSK_FAT16
     if (fs->fs_type != FS_FAT32) {
         DWORD ent_idx;
@@ -834,6 +885,8 @@ static int write_chk_entry(LBA_t sect, WORD off, const BYTE *name11,
     BYTE *cb;
 
     if (!fix_enabled()) return 1;
+    /* See find_root_slot/fix_fat_set: g_sect_a is also chain.c's cache. */
+    chain_invalidate();
     if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
     e = &g_sect_a[off];
     memcpy(e, name11, 11u);
@@ -916,6 +969,9 @@ static int zero_cluster(vol_t *fs, DWORD c)
 {
     LBA_t base = chain_cluster_to_lba(fs, c);
     UINT  i;
+    /* About to overwrite g_sect_a with zeros, but chain.c may still
+     * think it holds a FAT sector. Tell chain.c its cache is stale. */
+    chain_invalidate();
     memset(g_sect_a, 0, 512u);
     for (i = 0u; i < (UINT)fs->csize; i++) {
         if (!fix_write(base + (LBA_t)i, g_sect_a, 1u)) return 0;
@@ -992,6 +1048,11 @@ static int phase4_lostchn_open(vol_t *fs)
 
     if (!find_free_fat_cluster(fs, &newc)) goto fail;
     if (!fix_fat_set(fs, newc, LOSTCHN_EOC)) goto fail;
+    /* Mark in bitmap so the phase 4 orphan-head loop -- which only
+     * skips v==0 / bad / already-marked -- does not treat LOSTCHN's
+     * own EOC cluster as an orphan and create a self-referential
+     * FILE####.CHK pointing back into LOSTCHN. */
+    bitmap_set((u32)newc);
     if (!init_dir_cluster(fs, newc)) goto fail;
     if (!find_root_slot(fs, &sect, &off, ROOT_MATCH_FREE)
         && !find_root_slot(fs, &sect, &off, ROOT_MATCH_CHK)) {
@@ -1046,6 +1107,10 @@ static int phase4_lostchn_alloc_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
         if (!find_free_fat_cluster(fs, &newc))     { xr = 'f'; goto extend_fail; }
         if (!fix_fat_set(fs, g_lnf_cur_clu, newc)) { xr = 'l'; goto extend_fail; }
         if (!fix_fat_set(fs, newc, LOSTCHN_EOC))   { xr = 'e'; goto extend_fail; }
+        /* See phase4_lostchn_open: mark before the data-area write so
+         * an interleaved main-loop iteration cannot mistake newc for
+         * an orphan head. */
+        bitmap_set((u32)newc);
         if (!zero_cluster(fs, newc))               { xr = 'z'; goto extend_fail; }
         g_lnf_cur_clu = newc;
         g_lnf_cur_sec = 0u;
@@ -1062,23 +1127,10 @@ static int phase4_lostchn_alloc_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
     return 1;
 
 extend_fail:
-    fix_verbose_flush();
-    /* Format: "LCXx cu=N nc=N be=XX"
-     *   x  = which step (f/l/e/z)
-     *   cu = g_lnf_cur_clu (current LOSTCHN tail cluster)
-     *   nc = newc (cluster we tried to allocate; 0 if step f failed)
-     *   be = last BIOS error from disk_read/disk_write (hex) */
-    prt_str("  LCX");
-    prt_chr(xr);
-    prt_str(" fc=");
-    prt_dec((unsigned long)g_lnf_first_clu);
-    prt_str(" cu=");
-    prt_dec((unsigned long)g_lnf_cur_clu);
-    prt_str(" nc=");
-    prt_dec((unsigned long)newc);
-    prt_str(" be=");
-    prt_hex((unsigned long)diskio_dss_last_error(), 2u);
-    prt_nl();
+    /* Step (xr) is f/l/e/z; user can re-run with /V if the cause
+     * needs investigation. Compact note to keep _CODE under budget. */
+    (void)xr; (void)newc;
+    warn_str("LOSTCHN extend");
     g_lnf_first_clu = 0ul;
     return find_free_root_slot(fs, out_sect, out_off);
 }
@@ -1151,10 +1203,10 @@ static int phase4_lost(vol_t *fs)
                 if (chain_len == 0ul) {
                     /* defensive */
                 } else if (phase4_lostchn_alloc_slot(fs, &e_sect, &e_off)) {
-                    DWORD cluster_bytes = (DWORD)fs->csize << 9;
+                    /* size = chain_len * cluster_bytes; shift, no _mullong. */
+                    DWORD chk_size = chain_len << (fs->csize_shift + 9u);
                     format_chk_name(name, seq);
-                    if (write_chk_entry(e_sect, e_off, name, cc,
-                                        chain_len * cluster_bytes)) {
+                    if (write_chk_entry(e_sect, e_off, name, cc, chk_size)) {
                         chain_n++;
                         seq++;
                         lost_n += chain_len;
@@ -1162,10 +1214,7 @@ static int phase4_lost(vol_t *fs)
                         warn_str("FILE write");
                     }
                 } else {
-                    fix_verbose_flush();
-                    prt_str("  no slot c=");
-                    prt_dec((unsigned long)cc);
-                    prt_nl();
+                    warn_str("no slot");
                 }
                 chain_invalidate();
             } else {
@@ -1250,9 +1299,14 @@ static int phase4_lost(vol_t *fs)
                 DWORD v;
 
                 if (cc < 2ul || cc >= fs->n_fatent) continue;
-                if (bitmap_get((u32)cc)) continue;
+                /* Re-establish WIN3 = batch page; bitmap or chain
+                 * helpers in the previous iteration may have remapped
+                 * it. Without this, read_fat_entry_in_buf returns
+                 * bitmap or FAT-cache memory instead of batch FAT. */
+                (void)diskio_batch_map(0u);
                 v = read_fat_entry_in_buf(sec_buf, pos, shift);
                 if (v == 0ul || v == bad_marker) continue;
+                if (bitmap_get((u32)cc)) continue;
 
                 if (converting) {
                     /* cc is an orphan chain head. Walk + create
@@ -1271,53 +1325,23 @@ static int phase4_lost(vol_t *fs)
                     if (chain_len == 0ul) {
                         /* defensive: cycle protection in walker */
                     } else if (phase4_lostchn_alloc_slot(fs, &e_sect, &e_off)) {
-                        DWORD cluster_bytes = (DWORD)fs->csize << 9;
+                        DWORD chk_size = chain_len << (fs->csize_shift + 9u);
                         format_chk_name(name, seq);
-                        if (write_chk_entry(e_sect, e_off, name, cc,
-                                            chain_len * cluster_bytes)) {
+                        if (write_chk_entry(e_sect, e_off, name, cc, chk_size)) {
                             chain_n++;
                             seq++;
                             lost_n += chain_len;
                         } else {
-                            /* Diagnostic: dump the target sector + offset
-                             * + BIOS error. We need to see WHY writes are
-                             * failing in the field -- the cascade in
-                             * earlier runs gave no actionable info. */
-                            fix_verbose_flush();
-                            prt_str("  Wf s=");
-                            prt_dec((unsigned long)e_sect);
-                            prt_str(" o=");
-                            prt_dec((unsigned long)e_off);
-                            prt_str(" cu=");
-                            prt_dec((unsigned long)g_lnf_cur_clu);
-                            prt_str(" be=");
-                            prt_hex((unsigned long)diskio_dss_last_error(), 2u);
-                            prt_nl();
+                            warn_str("FILE write");
                         }
                     } else {
-                        /* No slot available -- print short note and
-                         * give the user a chance to abort the spam.
-                         * Accepts ESC and Ctrl+C. Ctrl+C is detected
-                         * three ways:
-                         *   raw ascii 0x03 (LAT-mode keymap),
-                         *   modifier+letter ('C'/'c' with CTRL bit),
-                         *   modifier+scan-code 0x2C (RUS-mode keymap,
-                         *     where the letter key produces ascii=0
-                         *     and the position code identifies it --
-                         *     same pattern as utils/diff with Z=0x2A,
-                         *     X=0x2B; C is the next bottom-row key). */
-                        fix_verbose_flush();
-                        prt_str("  no slot c=");
-                        prt_dec((unsigned long)cc);
-                        prt_nl();
+                        /* Press ESC to abort the conversion run. */
+                        warn_str("no slot");
                         if (dss_kbhit()) {
                             dss_key_t k;
                             dss_waitkey_ex(&k);
-                            if (k.ascii == 27u || k.ascii == 0x03u
-                                || ((k.modifiers & DSS_KEYMOD_CTRL)
-                                    && (k.ascii == 'C' || k.ascii == 'c'
-                                     || k.scan == 0x2Cu))) {
-                                prt_str("  aborted\r\n");
+                            if (k.ascii == 27u) {
+                                warn_str("aborted");
                                 diskio_batch_close();
                                 return -1;
                             }

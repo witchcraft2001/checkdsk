@@ -30,9 +30,11 @@ int summary_print(vol_t *fs, char drive_letter)
     unsigned long total_clusters;
     unsigned long total_bytes_lo;
 
-    cluster_bytes  = (unsigned long)fs->csize * 512ul;
+    /* cluster_bytes = csize * 512 = 1 << (csize_shift + 9); use shift
+     * everywhere to keep _mullong out of _HOME. */
+    cluster_bytes  = (unsigned long)fs->csize << 9;
     total_clusters = (unsigned long)(fs->n_fatent - 2u);
-    total_bytes_lo = total_clusters * cluster_bytes;
+    total_bytes_lo = total_clusters << (fs->csize_shift + 9u);
 
     prt_str("Volume ");
     prt_chr(drive_letter);
