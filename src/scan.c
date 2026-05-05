@@ -54,7 +54,7 @@
  * multi-sector reads) has headroom -- earlier iterations at depth=7
  * with full LFN frame state were observed clobbering g_fix_verbose_*
  * mid-walk. */
-#define SCAN_MAX_DEPTH  10u
+#define SCAN_MAX_DEPTH  7u
 
 #define ATTR_VOLID    0x08u
 #define ATTR_DIR      0x10u
@@ -472,6 +472,32 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
             } else {
                 warn_str("dir-corrupt");
             }
+        }
+
+        /* MVP dirent repair pack (specs.md:278-282). Each safe-to-apply
+         * dflag has a single corresponding fix_dir_patch kind. Looped
+         * for code compactness: the table is < 30 bytes and the body
+         * fits one walker_dirty / warn pair. Skipped on ATTR_LFN slots
+         * (no SFN structure) and on .  / .. entries (filtered out at
+         * the top of step). */
+        if (fix_enabled() && (dflags & (DE_ATTR_RESERVED | DE_NTRES_RSV
+                                      | DE_FAT16_HI_CLUST))
+            && (ent[11] & 0x3Fu) != ATTR_LFN) {
+            static const struct { UINT mask; u8 kind; } tbl[] = {
+                { DE_ATTR_RESERVED,  FIX_DPATCH_ATTR_MASK     },
+                { DE_NTRES_RSV,      FIX_DPATCH_NTRES_FIX     },
+                { DE_FAT16_HI_CLUST, FIX_DPATCH_HI_CLUST_ZERO }
+            };
+            LBA_t sect; WORD off; UINT k;
+            dirwalk_last_entry_location(&frame->walker, &sect, &off);
+            for (k = 0u; k < sizeof(tbl)/sizeof(tbl[0]); k++) {
+                if ((dflags & tbl[k].mask) == 0u) continue;
+                if (!fix_dir_patch(sect, off, tbl[k].kind, 0ul)) {
+                    warn_str("dpatch");
+                    break;
+                }
+            }
+            dirwalk_buffer_dirty(&frame->walker);
         }
     }
 

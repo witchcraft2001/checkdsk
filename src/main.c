@@ -91,6 +91,13 @@ static u8 dispatch(char letter)
             int srv = scan_run(&g_fs);
             if (srv > 0) total_errs += srv;
         }
+#if CHKDSK_FAT32
+        /* Force DSS to recompute FSInfo free_count on next mount.
+         * Done after all phase-2/4 writes so the recalc reflects the
+         * post-fix state. Gated on fix_any_applied so a clean /F run
+         * doesn't rewrite an already-correct FSInfo sector. */
+        if (fix_any_applied()) (void)fat_invalidate_fsinfo(&g_fs);
+#endif
         vol_unmount(&g_fs);
     } else {
         prt_str("mount rc=");
@@ -168,5 +175,12 @@ void main(void)
     if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
     print_banner();
     code = dispatch(letter);
+
+    /* If /F actually wrote anything, force DSS to drop its cached BPB
+     * and FAT/dir buffers. Without this DSS would continue serving the
+     * pre-fix volume state and the next file operation could overwrite
+     * our repairs with stale buffers. specs.md:288 -- mandatory. */
+    if (fix_any_applied()) diskio_dss_rescan();
+
     dss_exit(code);
 }

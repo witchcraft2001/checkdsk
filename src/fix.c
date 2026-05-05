@@ -45,6 +45,7 @@ void fix_verbose_flush(void)
 void fix_count_found(void)   { g_fix_found++; }
 void fix_count_applied(void) { g_fix_applied++; }
 int  fix_any_found(void)     { return (g_fix_found != 0ul) ? 1 : 0; }
+int  fix_any_applied(void)   { return (g_fix_applied != 0ul) ? 1 : 0; }
 
 int fix_write(LBA_t lba, const BYTE *buf, UINT count)
 {
@@ -167,6 +168,17 @@ int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
         g_sect_a[off + 21u] = vb[3];
         g_sect_a[off + 26u] = vb[0];
         g_sect_a[off + 27u] = vb[1];
+        break;
+    case FIX_DPATCH_ATTR_MASK:
+        g_sect_a[off + 11u] &= 0x3Fu;
+        break;
+    case FIX_DPATCH_NTRES_FIX:
+        g_sect_a[off + 12u] &= 0x18u;
+        g_sect_a[off + 13u]  = 0u;
+        break;
+    case FIX_DPATCH_HI_CLUST_ZERO:
+        g_sect_a[off + 20u] = 0u;
+        g_sect_a[off + 21u] = 0u;
         break;
     default: /* FIX_DPATCH_SIZE */
         g_sect_a[off + 28u] = vb[0];

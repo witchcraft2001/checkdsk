@@ -112,6 +112,25 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buf, LBA_t sector, UINT count)
     return RES_OK;
 }
 
+/* DRV_DETECT trampoline. The SDK does not provide one (only the
+ * BIOS_DRV_DETECT = 0x57 constant). Convention is the same as every
+ * other BIOS function: load C with the function code, RST 8. The call
+ * takes no arguments and returns nothing meaningful -- it scans the
+ * IDE/FDD ports and rewrites the device descriptors at #C1C0..#C1E8.
+ * Save IX/IY since BIOS may clobber them. */
+void diskio_dss_rescan(void) __naked
+{
+    __asm
+        push    ix
+        push    iy
+        ld      c, #0x57         ; BIOS_DRV_DETECT
+        rst     #0x08
+        pop     iy
+        pop     ix
+        ret
+    __endasm;
+}
+
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {
     if (pdrv != 0u || g_dev_disk == 0xFFu) return RES_NOTRDY;

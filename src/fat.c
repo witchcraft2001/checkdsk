@@ -445,6 +445,34 @@ static void check_special_entries(vol_t *fs, int *errs)
     prt_str(", FAT[1] OK\r\n");
 }
 
+#if CHKDSK_FAT32
+int fat_invalidate_fsinfo(vol_t *fs)
+{
+    unsigned long sig0, sig1;
+    UINT i;
+
+    if (fs->fs_type != FS_FAT32)  return 1;
+    if (fs->fsi_sector == 0ul)    return 1;
+    if (!fix_enabled())           return 1;
+
+    if (disk_read(0, g_fat_a, fs->fsi_sector, 1) != RES_OK) return 0;
+    sig0 = ld_dword(&g_fat_a[0]);
+    sig1 = ld_dword(&g_fat_a[484]);
+    if (sig0 != 0x41615252ul || sig1 != 0x61417272ul) {
+        fat_warn("FSInfo signatures bad, skipping recalc");
+        return 1;
+    }
+
+    /* FSI_Free_Count at offset 488, FSI_Nxt_Free at 492. 0xFFFFFFFF
+     * means "unknown -- recompute on next use" (FAT spec, valid). */
+    for (i = 488u; i < 496u; i++) g_fat_a[i] = 0xFFu;
+    if (!fix_write(fs->fsi_sector, g_fat_a, 1u)) return 0;
+    fix_count_applied();
+    prt_str("  FSInfo: free_count/next_free invalidated for recalc\r\n");
+    return 1;
+}
+#endif
+
 int fat_check(vol_t *fs)
 {
     int   errs = 0;

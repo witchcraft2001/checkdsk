@@ -75,7 +75,7 @@ all: chkdsk chkdsk12
 #   chkdsk12 -- DATA_LOC=0xBA00. Smaller binary (FAT12 only), keeps
 #               the lower DATA_LOC and a generous ~570 bytes of stack.
 chkdsk:
-	@$(MAKE) APP=chkdsk CHKDSK_FAT12=0 CHKDSK_FAT16=1 CHKDSK_FAT32=1 DATA_LOC=0xB900
+	@$(MAKE) APP=chkdsk CHKDSK_FAT12=0 CHKDSK_FAT16=1 CHKDSK_FAT32=1 DATA_LOC=0xBB00
 
 chkdsk12:
 	@$(MAKE) APP=chkdsk12 CHKDSK_FAT12=1 CHKDSK_FAT16=0 CHKDSK_FAT32=0 DATA_LOC=0xBA00

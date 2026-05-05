@@ -34,11 +34,13 @@
 #define DE_LFN_BAD           0x0040u  /* LFN type/cluster slot != 0 */
 #define DE_CLUST_OOR         0x0080u  /* first cluster == 1 or >= n_fatent */
 #define DE_FAT16_HI_CLUST    0x0100u  /* FAT12/16 with non-zero hi cluster */
+#define DE_NTRES_RSV         0x0200u  /* NTRES has reserved bits or
+                                          CrtTimeTenth > 199 */
 
 #define DE_ANY_ERROR        (DE_NAME_BAD_CHAR    | DE_ATTR_RESERVED | \
                              DE_VOL_NONZERO      | DE_LFN_BAD       | \
                              DE_CLUST_OOR        | DE_FAT16_HI_CLUST | \
-                             DE_DIR_NONZERO_SIZE)
+                             DE_DIR_NONZERO_SIZE | DE_NTRES_RSV)
 
 /* Inspect the 32-byte entry `e` and return a bitmask of DE_* flags.
  * Returns 0 when the entry is clean (or is a deleted slot that we

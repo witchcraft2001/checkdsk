@@ -23,4 +23,16 @@
  * print to stdout in compact form. */
 int fat_check(vol_t *fs);
 
+#if CHKDSK_FAT32
+/* On FAT32, mark FSI_Free_Count and FSI_Nxt_Free as "unknown"
+ * (0xFFFFFFFF) in the FSInfo sector, so DSS recomputes them on next
+ * mount. Called once at end of /F if any repair touched the FAT. The
+ * spec calls for an explicit recompute, but writing the "unknown"
+ * sentinel is FAT-spec-equivalent and avoids tracking deltas across
+ * phase 2 (counts free) and phase 4 (frees more clusters). Skips
+ * silently if FSInfo signatures are bad or the volume has no FSInfo
+ * sector. Returns 1 on success or skip, 0 on I/O error. */
+int fat_invalidate_fsinfo(vol_t *fs);
+#endif
+
 #endif /* CHKDSK_FAT_H */

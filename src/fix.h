@@ -75,10 +75,17 @@ void fix_print_summary(void);
  * exit code so a script can branch on it. */
 int  fix_any_found(void);
 
+/* Non-zero if any fix_count_applied was invoked -- main.c uses this to
+ * gate the post-/F BIOS DRV_DETECT rescan. */
+int  fix_any_applied(void);
+
 /* Directory-entry patch kinds for fix_dir_patch. */
-#define FIX_DPATCH_SIZE       0u  /* set size DWORD (off+28..31) to value */
-#define FIX_DPATCH_DELETE     1u  /* mark entry deleted (off byte = 0xE5) */
-#define FIX_DPATCH_DOT_CLUST  2u  /* set FstClus(HI|LO) (off+20..21,26..27) */
+#define FIX_DPATCH_SIZE          0u  /* set size DWORD (off+28..31) to value */
+#define FIX_DPATCH_DELETE        1u  /* mark entry deleted (off byte = 0xE5) */
+#define FIX_DPATCH_DOT_CLUST     2u  /* set FstClus(HI|LO) (off+20..21,26..27) */
+#define FIX_DPATCH_ATTR_MASK     3u  /* attr (off+11) &= 0x3F (drop reserved) */
+#define FIX_DPATCH_NTRES_FIX     4u  /* NTRES (off+12) &= 0x18; CrtTen=0 */
+#define FIX_DPATCH_HI_CLUST_ZERO 5u  /* zero FstClusHI on FAT12/16 */
 
 /* Write `value` (next-cluster, EOC, BAD, or 0=free) to the FAT entry
  * for `clust`. Mirrors into FAT 2 if n_fats == 2. Reads the FAT sector

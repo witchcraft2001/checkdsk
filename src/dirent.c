@@ -79,6 +79,19 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
 
     if (attr & 0xC0u) flags |= DE_ATTR_RESERVED;
 
+    /* DIR_NTRes (0x0C) -- only bits 3 and 4 (lowercase basename / ext)
+     * are defined; the rest must be zero. CrtTimeTenth (0x0D) ranges
+     * 0..199 (tens of milliseconds within a 2-second wrt_time slot).
+     * Out-of-range values are RTC corruption or random garbage; both
+     * map to a single repair (zero NTRES non-case bits, zero tenths).
+     *
+     * Note: full timestamp range-validation (5 fields per entry) was
+     * dropped in favour of /F /C and FSInfo recalc -- bad timestamps
+     * affect display only, never disk integrity, while the dropped
+     * code freed ~280 B of _CODE that the FAT32 FSInfo updater needs. */
+    if ((e[12] & ~0x18u) != 0u) flags |= DE_NTRES_RSV;
+    if (e[13] > 199u)           flags |= DE_NTRES_RSV;
+
     {
         BYTE *fc = (BYTE *)&first_clust;
         fc[0] = e[26]; fc[1] = e[27]; fc[2] = e[20]; fc[3] = e[21];
@@ -122,7 +135,8 @@ void dirent_flags_print(UINT flags)
         { DE_VOL_NONZERO,      " vol-nz" },
         { DE_LFN_BAD,          " lfn-bad" },
         { DE_CLUST_OOR,        " clust-oor" },
-        { DE_FAT16_HI_CLUST,   " fat16-hi" }
+        { DE_FAT16_HI_CLUST,   " fat16-hi" },
+        { DE_NTRES_RSV,        " ntres" }
     };
     UINT i;
     if (flags == 0u) return;

@@ -43,4 +43,12 @@ u8 diskio_dss_last_error(void);
  * Returns 0 on success, 1 on error. Used by diskio_batch only. */
 u8 diskio_dss_read_batch(unsigned long lba, u8 count, u8 *dst);
 
+/* Re-issue BIOS DRV_DETECT (#57). Re-scans the IDE/FDD descriptors at
+ * #C1C0..#C1E8 and forces DSS to drop its cached BPB / FAT / dir
+ * buffers, so subsequent file-system access reads what we just wrote
+ * during /F. Must be called once after the last write of a /F run,
+ * before dss_exit. The SDK exposes the constant BIOS_DRV_DETECT but
+ * provides no C wrapper; this trampoline supplies one. */
+void diskio_dss_rescan(void);
+
 #endif /* CHKDSK_DISKIO_DSS_H */
