@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build chkdsk.exe and chkdsk12.exe, then pack them together with the
-# user guides into a FAT12 floppy image and a distribution zip.
+# Build chkdsk.exe, then pack it together with the user guides into a
+# FAT12 floppy image and a distribution zip.
 #
 # Usage: create_floppy_image.sh [image_path] [dist_zip_path]
 #
@@ -46,8 +46,8 @@ rm -f "$image_path"
 rm -f "$dist_zip_path"
 rm -rf "$dist_root"
 
-# ---- 1. Build both targets ----
-echo "Building chkdsk.exe and chkdsk12.exe..."
+# ---- 1. Build the binary ----
+echo "Building chkdsk.exe..."
 make -C "$repo_root" clean
 if [ -n "$CHKDSK_BUILD_VERSION" ]; then
   make -C "$repo_root" LOG="$CHKDSK_BUILD_LOG" VERSION="$CHKDSK_BUILD_VERSION"
@@ -55,12 +55,10 @@ else
   make -C "$repo_root" LOG="$CHKDSK_BUILD_LOG"
 fi
 
-for f in chkdsk.exe chkdsk12.exe; do
-  if [ ! -f "$repo_root/$f" ]; then
-    echo "Error: $f was not produced by the build" >&2
-    exit 1
-  fi
-done
+if [ ! -f "$repo_root/chkdsk.exe" ]; then
+  echo "Error: chkdsk.exe was not produced by the build" >&2
+  exit 1
+fi
 
 # ---- 2. Convert markdown user guides to packagable plain text ----
 #
@@ -85,14 +83,12 @@ mkdir_img_dir() { mmd -i "$image_path" "$1" 2>/dev/null || true; }
 
 mkdir_img_dir "::/CHKDSK"
 mcopy -i "$image_path" -o "$repo_root/chkdsk.exe"   "::/CHKDSK/CHKDSK.EXE"
-mcopy -i "$image_path" -o "$repo_root/chkdsk12.exe" "::/CHKDSK/CHKDSK12.EXE"
 mcopy -i "$image_path" -o "$readme_eng"             "::/CHKDSK/README.ENG"
 mcopy -i "$image_path" -o "$readme_txt"             "::/CHKDSK/README.TXT"
 
 # ---- 4. Build the dist zip (same payload, flat) ----
 mkdir -p "$dist_root/CHKDSK"
 cp "$repo_root/chkdsk.exe"   "$dist_root/CHKDSK/CHKDSK.EXE"
-cp "$repo_root/chkdsk12.exe" "$dist_root/CHKDSK/CHKDSK12.EXE"
 cp "$readme_eng"             "$dist_root/CHKDSK/README.ENG"
 cp "$readme_txt"             "$dist_root/CHKDSK/README.TXT"
 

@@ -9,6 +9,7 @@
 #include <string.h>
 #include "bitmap.h"
 #include "diskio_batch.h"
+#include "sectbuf.h"
 
 #define BITMAP_PAGE_SIZE  16384u   /* DSS page granule */
 #define BITMAP_WIN        3u       /* WIN3 = 0xC000..0xFFFF */
@@ -28,8 +29,11 @@ static void bitmap_map_page(u8 page_idx)
      * batch page is mapped here -- tell it to re-map next time. Without
      * this, phase 4's main loop reads "FAT entries" from bitmap memory
      * after every bitmap_get/test_and_set call, producing garbage that
-     * cascaded into LOSTCHN entries pointing at wrong clusters. */
+     * cascaded into LOSTCHN entries pointing at wrong clusters.
+     *
+     * sectbuf shares WIN3 too -- same invalidation rule applies. */
     diskio_batch_invalidate();
+    sectbuf_invalidate();
 }
 
 void bitmap_invalidate(void)

@@ -191,17 +191,18 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
     unsigned long eoc_min = is_fat32 ? EOC32_MIN : (unsigned long)EOC16_MIN;
     UINT          step    = is_fat32 ? 4u : 2u;
     unsigned long diff_sectors = 0ul;
-    /* Borrow the static g_sect_a (512 B sector scratch) as backing
-     * for sums[]. check_fat_wide does NOT touch g_sect_a between
-     * the FAT[0] batch read and the FAT[1] compare (the batch reads
-     * land in WIN3 page memory, not g_sect_a; validate_one only
-     * inspects the page), so the cast-aliasing is safe within this
-     * call. Avoids 128 bytes of stack pressure that previously
-     * pushed Phase 2's peak past the budget and clobbered scan.c's
-     * g_lnf_cur_* and fix.c's g_fix_verbose at the high end of
-     * _INITIALIZED -- causing Phase 4 "WARN: write FILE failed"
-     * cascades and missing /V dots in Phase 3. */
-    unsigned long *sums = (unsigned long *)g_sect_a;
+    /* Per-sector checksums of FAT 1, held while FAT 2 is read into the
+     * same batch page for the mismatch compare. This MUST NOT alias the
+     * batch page: g_sect_a and the batch page are both WIN3 (0xC000) on
+     * the Sprinter, so an earlier `(unsigned long*)g_sect_a` cast made
+     * `sums[]` overwrite the first 128 bytes of the FAT-1 page -- the
+     * checksum writes clobbered FAT entries for clusters 0..63, which
+     * validate_one then reported as bogus "invalid" values, and the
+     * FAT-2 read overwrote the saved sums so the compare flagged ~half
+     * the sectors as differing. Invisible on hosts with separate
+     * buffers; a dedicated static (128 B _DATA, affordable since the
+     * win0 layout freed ~14 KB of data) is the fix. */
+    static unsigned long sums[BATCH_SECTORS_PER_PAGE];
     DWORD         sec_off;
     u8           *page;
 

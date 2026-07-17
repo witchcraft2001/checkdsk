@@ -54,7 +54,7 @@
  * multi-sector reads) has headroom -- earlier iterations at depth=7
  * with full LFN frame state were observed clobbering g_fix_verbose_*
  * mid-walk. */
-#define SCAN_MAX_DEPTH  7u
+#define SCAN_MAX_DEPTH  16u
 
 #define ATTR_VOLID    0x08u
 #define ATTR_DIR      0x10u
@@ -74,15 +74,23 @@ typedef struct {
     DWORD     start_cluster; /* first cluster of this directory (0 for FAT12/16 root) */
 } scan_frame_t;
 
-/* NOTE: every uninitialized static in this file is given an explicit
+/* NOTE: most uninitialized statics in this file are given an explicit
  * `= {0}` / `= 0`. The Sprinter SDK's crt0.s only zeroes _BSS, but
- * SDCC z80 places uninitialized statics in _DATA — so without an
+ * SDCC z80 places uninitialized statics in _DATA -- so without an
  * explicit initializer they retain whatever bytes were at their
- * load address at boot time, which corrupts the walker frames, the
- * LOSTCHN allocation cursor, and the captured fat date/time. */
-static scan_frame_t g_frames[SCAN_MAX_DEPTH + 1u] = {{{0}}};
+ * load address at boot time, which corrupts the LOSTCHN allocation
+ * cursor and the captured fat date/time.
+ *
+ * g_frames is the exception: every frame is fully initialised by
+ * dirwalk_open_root (frame 0) or dirwalk_open_chain (descend) before
+ * any field is read, so leaving it uninit halves its memory cost
+ * (no _INITIALIZER copy alongside _INITIALIZED at depth=16 -> save
+ * 595 B). frame[0].name is never consumed (only depths >=1 print). */
+static scan_frame_t g_frames[SCAN_MAX_DEPTH + 1u];
 
-/* Aggregate counters for the whole walk. */
+/* Aggregate counters for the whole walk. Held statically (rather than
+ * on scan_run's stack) so step()'s deep call chain doesn't compete
+ * with 36 B of locals for the 350-ish-byte stack budget. */
 typedef struct {
     DWORD entries;
     DWORD dirs;
@@ -95,6 +103,9 @@ typedef struct {
     DWORD depth_capped;
 } scan_totals_t;
 
+/* Uninit at boot is fine: walk_tree zeroes every field before use. */
+static scan_totals_t g_totals;
+
 /* Chain-walk findings, flag bits returned by walk_chain. */
 #define CW_CYCLE      0x01u   /* first cluster already set in bitmap */
 #define CW_CROSS      0x02u   /* mid-chain cluster already set */
@@ -103,6 +114,10 @@ typedef struct {
 #define CW_IO_ERR     0x10u   /* disk_read failure */
 #define CW_TRUNCATED  0x20u   /* file size implies more clusters than chain */
 #define CW_EXCESS     0x40u   /* file size implies fewer clusters than chain */
+
+/* End-of-chain marker for repairs. fix_fat_set packs the value into
+ * 12/16/28 bits per FAT type, so one constant works on every layout. */
+#define CHAIN_SET_EOC  0x0FFFFFFFul
 
 static DWORD entry_first_cluster(const BYTE *e)
 {
@@ -236,16 +251,19 @@ static int dir_has_dot_entry(vol_t *fs, DWORD clust)
 /* Walk the FAT chain at `start`, marking visited clusters in the bitmap.
  * Stops at EOC, BAD, invalid link, I/O error, or test_and_set hit.
  * Returns CW_* flag bits; chain length is written to *len_out (0 means
- * "we never marked anything", e.g. cycle on the first cluster).
+ * "we never marked anything", e.g. cycle on the first cluster), and the
+ * last cluster this walk claimed to *last_out -- the EOC-termination
+ * repair writes there when the chain ended in garbage.
  * g_sect_a ends up holding a FAT sector -- callers using a dirwalk must
  * mark its buffer dirty after returning. */
-static UINT walk_chain(vol_t *fs, DWORD start, DWORD *len_out)
+static UINT walk_chain(vol_t *fs, DWORD start, DWORD *len_out, DWORD *last_out)
 {
     DWORD c = start;
     DWORD next;
     DWORD len = 0ul;
     UINT  flags = 0u;
 
+    *last_out = start;
     if (bitmap_test_and_set(c)) { *len_out = 0ul; return CW_CYCLE; }
     len = 1ul;
 
@@ -259,7 +277,8 @@ static UINT walk_chain(vol_t *fs, DWORD start, DWORD *len_out)
         len++;
         c = next;
     }
-    *len_out = len;
+    *len_out  = len;
+    *last_out = c;
     return flags;
 }
 
@@ -310,8 +329,9 @@ static void print_flagged(BYTE depth, const BYTE *e)
  * uses g_sect_a as its FAT-sector cache, so it clobbers that pointer.
  * We snapshot the 32-byte entry into ent[] before doing any
  * I/O that touches g_sect_a, and operate on the snapshot afterwards. */
-static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
+static int step(vol_t *fs, BYTE *depth)
 {
+    scan_totals_t *t = &g_totals;
     scan_frame_t *frame;
     BYTE         *src;
     BYTE          ent[32];
@@ -322,6 +342,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     DWORD         clust;
     DWORD         size;
     DWORD         chain_len;
+    DWORD         chain_last;
     int           is_file;
     int           has_dot;   /* -1=not peeked, 0=garbage, 1=real subdir */
 
@@ -406,7 +427,7 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
     size    = ld_size(ent);
 
     if (ent[0] != 0xE5u && clust >= 2ul && clust < fs->n_fatent) {
-        cflags |= walk_chain(fs, clust, &chain_len);
+        cflags |= walk_chain(fs, clust, &chain_len, &chain_last);
         dirwalk_buffer_dirty(&g_frames[*depth].walker);
 
         if (is_file && size != 0ul
@@ -475,28 +496,25 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         }
 
         /* MVP dirent repair pack (specs.md:278-282). Each safe-to-apply
-         * dflag has a single corresponding fix_dir_patch kind. Looped
-         * for code compactness: the table is < 30 bytes and the body
-         * fits one walker_dirty / warn pair. Skipped on ATTR_LFN slots
-         * (no SFN structure) and on .  / .. entries (filtered out at
-         * the top of step). */
+         * dflag triggers one fix_dir_patch. Skipped on ATTR_LFN slots
+         * (no SFN structure) and on . / .. entries (filtered out at
+         * the top of step). Inlined as an if-cascade -- table-driven
+         * version added ~20 B vs hand-rolled because the table itself
+         * (2 entries * 3 B + per-iter loop overhead) outweighed the
+         * common-prefix savings at three masks. */
         if (fix_enabled() && (dflags & (DE_ATTR_RESERVED | DE_NTRES_RSV
                                       | DE_FAT16_HI_CLUST))
             && (ent[11] & 0x3Fu) != ATTR_LFN) {
-            static const struct { UINT mask; u8 kind; } tbl[] = {
-                { DE_ATTR_RESERVED,  FIX_DPATCH_ATTR_MASK     },
-                { DE_NTRES_RSV,      FIX_DPATCH_NTRES_FIX     },
-                { DE_FAT16_HI_CLUST, FIX_DPATCH_HI_CLUST_ZERO }
-            };
-            LBA_t sect; WORD off; UINT k;
+            LBA_t sect; WORD off;
+            int   ok = 1;
             dirwalk_last_entry_location(&frame->walker, &sect, &off);
-            for (k = 0u; k < sizeof(tbl)/sizeof(tbl[0]); k++) {
-                if ((dflags & tbl[k].mask) == 0u) continue;
-                if (!fix_dir_patch(sect, off, tbl[k].kind, 0ul)) {
-                    warn_str("dpatch");
-                    break;
-                }
-            }
+            if (ok && (dflags & DE_ATTR_RESERVED))
+                ok = fix_dir_patch(sect, off, FIX_DPATCH_ATTR_MASK, 0ul);
+            if (ok && (dflags & DE_NTRES_RSV))
+                ok = fix_dir_patch(sect, off, FIX_DPATCH_NTRES_FIX, 0ul);
+            if (ok && (dflags & DE_FAT16_HI_CLUST))
+                ok = fix_dir_patch(sect, off, FIX_DPATCH_HI_CLUST_ZERO, 0ul);
+            if (!ok) warn_str("dpatch");
             dirwalk_buffer_dirty(&frame->walker);
         }
     }
@@ -593,7 +611,24 @@ static int step(vol_t *fs, BYTE *depth, scan_totals_t *t)
         dirwalk_buffer_dirty(&frame->walker);
     }
 
-
+    /* Terminate the chain at the last cluster this entry actually owns
+     * when the walk stopped on a garbage link (BROKEN -- also covers
+     * BAD, which always sets BROKEN) or on territory claimed by
+     * another chain (CROSS). Writing EOC there clears the invalid FAT
+     * value that phase 2 would otherwise keep reporting forever, and
+     * detaches the cross-link at the fork (first claimant keeps the
+     * shared tail). The size shrink above already matches the kept
+     * chain, so one run leaves the entry fully consistent. */
+    if (fix_enabled() && chain_len != 0ul
+        && (cflags & (CW_BROKEN | CW_CROSS)) != 0u) {
+        if (fix_fat_set(fs, chain_last, CHAIN_SET_EOC)) {
+            fix_count_applied();
+        } else {
+            warn_str("chain-eoc");
+        }
+        chain_invalidate();
+        dirwalk_buffer_dirty(&frame->walker);
+    }
 
     if (!is_descendable_dir(ent, dflags)) return 1;
     if (clust < 2ul || clust >= fs->n_fatent) return 1;
@@ -627,20 +662,20 @@ static void emit_count(const char *label, DWORD val)
     prt_dec((unsigned long)val);
 }
 
-static int walk_tree(vol_t *fs, scan_totals_t *t)
+static int walk_tree(vol_t *fs)
 {
     BYTE depth;
     int  rc;
 
-    t->entries       = 0ul;
-    t->dirs          = 0ul;
-    t->flagged       = 0ul;
-    t->cycles        = 0ul;
-    t->cross_links   = 0ul;
-    t->broken_chains = 0ul;
-    t->truncated     = 0ul;
-    t->excess        = 0ul;
-    t->depth_capped  = 0ul;
+    g_totals.entries       = 0ul;
+    g_totals.dirs          = 0ul;
+    g_totals.flagged       = 0ul;
+    g_totals.cycles        = 0ul;
+    g_totals.cross_links   = 0ul;
+    g_totals.broken_chains = 0ul;
+    g_totals.truncated     = 0ul;
+    g_totals.excess        = 0ul;
+    g_totals.depth_capped  = 0ul;
 
     depth = 0u;
     /* Root frame: start_cluster only used by dot validation, which is
@@ -652,7 +687,7 @@ static int walk_tree(vol_t *fs, scan_totals_t *t)
     dirwalk_open_root(&g_frames[0].walker, fs);
 
     for (;;) {
-        rc = step(fs, &depth, t);
+        rc = step(fs, &depth);
         if (rc < 0) return -1;
         if (depth == 0xFFu) break;
     }
@@ -672,79 +707,40 @@ static DWORD read_fat_entry_in_buf(const u8 *buf, UINT pos, UINT shift)
     return v;
 }
 
-/* Pre-pass for /CONVERT. For each cluster c that is orphan (bit unset
- * in the post-walk_tree bitmap) and whose FAT entry is a forward link
- * to a valid cluster v, mark v in the bitmap. After this pass, any
- * orphan cluster c with bitmap[c]==0 is a chain HEAD: nothing in the
- * orphan subgraph references it. Entirely-cyclic orphan groups have
- * no head and are not converted.
+/* Walk an orphan chain starting at cluster c, claiming each cluster in
+ * the bitmap (test_and_set stops cycles and keeps converted chains
+ * disjoint). Stops at EOC, BAD-marker link, out-of-range link, an
+ * already-claimed cluster, or read error.
  *
- * Caller must already hold an open batch (diskio_batch_open(1u)) -- we
- * reuse the same WIN3 page so opening/closing twice is avoided. */
-static int phase4_premark(vol_t *fs, UINT shift, UINT n_per, DWORD bad)
-{
-    DWORD sec_off = 0ul;
-    LBA_t fat1    = fs->fatbase;
-
-    while (sec_off < fs->fsize) {
-        DWORD remaining = fs->fsize - sec_off;
-        u8    batch     = (remaining > BATCH_SECTORS_PER_PAGE)
-                          ? (u8)BATCH_SECTORS_PER_PAGE
-                          : (u8)remaining;
-        u8   *page;
-        u8    si;
-
-        fix_verbose_tick();
-
-        if (!diskio_batch_read((unsigned long)(fat1 + (LBA_t)sec_off),
-                               batch, 0u)) return -1;
-        page = diskio_batch_map(0u);
-
-        for (si = 0u; si < batch; si++) {
-            DWORD this_sec  = sec_off + (DWORD)si;
-            DWORD start_c   = (shift == 2u) ? (this_sec << 7)
-                                            : (this_sec << 8);
-            const u8 *sec_buf = page + (UINT)si * 512u;
-            UINT      cc_in;
-
-            if (start_c >= fs->n_fatent) break;
-
-            for (cc_in = 0u; cc_in < n_per; cc_in++) {
-                DWORD cc = start_c + (DWORD)cc_in;
-                DWORD v;
-                if (cc < 2ul || cc >= fs->n_fatent) continue;
-                /* Re-establish WIN3 = batch page in case the previous
-                 * iteration's bitmap_get/set re-mapped it to bitmap.
-                 * No-op when already on the batch page. Skipping this
-                 * caused read_fat_entry_in_buf to read bitmap memory
-                 * as FAT entries -- corrupting premark and producing
-                 * stale orphan detection. */
-                (void)diskio_batch_map(0u);
-                v = read_fat_entry_in_buf(sec_buf, cc_in << shift, shift);
-                if (v < 2ul || v >= fs->n_fatent || v == bad) continue;
-                if (bitmap_get((u32)cc)) continue;
-                bitmap_set((u32)v);
-            }
-        }
-
-        sec_off += (DWORD)batch;
-    }
-    return 0;
-}
-
-/* Walk an orphan chain starting at cluster c. Mark each cluster in the
- * bitmap (test_and_set protects against cycles). Returns chain length. */
+ * Under /F the walked chain is then TERMINATED: unless it already
+ * ended in a clean EOC, the last claimed cluster gets an EOC written.
+ * This is what makes /CONVERT safe -- it breaks self-loops and cycles,
+ * cuts garbage tails (phase 2 "invalid" values), and detaches links
+ * into territory owned by other chains, so every FILE####.CHK ends up
+ * a linear, self-contained file. Without it, a converted chain keeps
+ * its rotten FAT links and the next scan reports cycle/cross/excess
+ * on the very files a repair run just created.
+ *
+ * Returns the claimed cluster count (0 = head was already claimed). */
 static DWORD phase4_walk_chain(vol_t *fs, DWORD c)
 {
-    DWORD len = 0ul;
+    DWORD len  = 0ul;
+    DWORD last = 0ul;
+    u8    clean_end = 0u;
+
     while (c >= 2ul && c < fs->n_fatent) {
         DWORD nx;
         if (bitmap_test_and_set((u32)c)) break;
         len++;
+        last = c;
         nx = chain_get_entry(fs, c);
         if (nx == CHAIN_READ_ERROR) break;
-        if (chain_is_eoc(fs, nx) || chain_is_bad(fs, nx)) break;
+        if (chain_is_eoc(fs, nx)) { clean_end = 1u; break; }
+        if (chain_is_bad(fs, nx)) break;
         c = nx;
+    }
+    if (len != 0ul && !clean_end) {
+        if (!fix_fat_set(fs, last, CHAIN_SET_EOC)) warn_str("chain-eoc");
     }
     return len;
 }
@@ -964,10 +960,6 @@ static UINT  g_lnf_cur_off   = 0u;
  * invocation, and the explicit `= 0` initialisers above land these
  * in _INITIALIZED so gsinit gives them a clean starting state. */
 
-/* End-of-chain marker. fix_fat_set packs the value into 12/16/28
- * bits per FAT type, so the same constant works on every layout. */
-#define LOSTCHN_EOC  0x0FFFFFFFul
-
 /* Forward-scan FAT for a free cluster (entry == 0), starting from
  * cluster 2 every call. No hint optimisation: a previous version
  * cached the last allocation in g_free_cluster_hint, but the value
@@ -1051,7 +1043,8 @@ static int phase4_lostchn_open(vol_t *fs)
 {
     DWORD newc;
     LBA_t sect;
-    UINT  off, i;
+    WORD  off;
+    UINT  i;
     BYTE *e, *cb;
 
     g_lnf_tried = 1u;
@@ -1073,7 +1066,7 @@ static int phase4_lostchn_open(vol_t *fs)
     }
 
     if (!find_free_fat_cluster(fs, &newc)) goto fail;
-    if (!fix_fat_set(fs, newc, LOSTCHN_EOC)) goto fail;
+    if (!fix_fat_set(fs, newc, CHAIN_SET_EOC)) goto fail;
     /* Mark in bitmap so the phase 4 orphan-head loop -- which only
      * skips v==0 / bad / already-marked -- does not treat LOSTCHN's
      * own EOC cluster as an orphan and create a self-referential
@@ -1132,7 +1125,7 @@ static int phase4_lostchn_alloc_slot(vol_t *fs, LBA_t *out_sect, WORD *out_off)
     if (g_lnf_cur_sec >= (UINT)fs->csize) {
         if (!find_free_fat_cluster(fs, &newc))     { xr = 'f'; goto extend_fail; }
         if (!fix_fat_set(fs, g_lnf_cur_clu, newc)) { xr = 'l'; goto extend_fail; }
-        if (!fix_fat_set(fs, newc, LOSTCHN_EOC))   { xr = 'e'; goto extend_fail; }
+        if (!fix_fat_set(fs, newc, CHAIN_SET_EOC))   { xr = 'e'; goto extend_fail; }
         /* See phase4_lostchn_open: mark before the data-area write so
          * an interleaved main-loop iteration cannot mistake newc for
          * an orphan head. */
@@ -1170,10 +1163,13 @@ extend_fail:
  *               FILE####.CHK entry under LOSTCHN/ pointing at it.
  *
  * Bitmap state at entry: 1 = reachable from any directory entry
- * (set by walk_tree). For /CONVERT, a pre-pass marks orphan chain
- * successors so the main pass can identify chain heads. The main
- * pass walks each FAT sector, locates orphan heads (or just any
- * orphan in free-mode), and applies the chosen repair. */
+ * (set by walk_tree). The pass scans clusters in ascending order;
+ * for /CONVERT each still-unclaimed orphan starts a claim-walk
+ * (phase4_walk_chain) that marks its whole chain in the bitmap and
+ * EOC-terminates it, so every orphan is converted exactly once and
+ * every FILE####.CHK is linear and self-contained. A chain whose
+ * middle has a lower cluster index than its head converts as two
+ * files -- data preserved, cosmetically split. */
 static int phase4_lost(vol_t *fs)
 {
     DWORD lost_n   = 0ul;
@@ -1182,7 +1178,7 @@ static int phase4_lost(vol_t *fs)
     DWORD sec_idx;
     UINT  shift, n_per;
     DWORD bad_marker;
-    LBA_t fat1, fat2;
+    LBA_t fat1;
     int   converting;
 
     prt_str("Phase 4: lost clusters\r\n");
@@ -1199,20 +1195,6 @@ static int phase4_lost(vol_t *fs)
      * ~4085 clusters, so this is fine in practice. */
     if (fs->fs_type == FS_FAT12) {
         DWORD cc;
-
-        /* Pre-pass for /CONVERT: mark successors so we can identify
-         * chain heads in the main pass. */
-        if (converting) {
-            for (cc = 2ul; cc < fs->n_fatent; cc++) {
-                DWORD v;
-                if (bitmap_get((u32)cc)) continue;
-                v = chain_get_entry(fs, cc);
-                if (v == CHAIN_READ_ERROR) { err_str("FAT read"); return -1; }
-                if (v < 2ul || v >= fs->n_fatent) continue;
-                if (chain_is_bad(fs, v)) continue;
-                bitmap_set((u32)v);
-            }
-        }
 
         for (cc = 2ul; cc < fs->n_fatent; cc++) {
             DWORD v;
@@ -1265,7 +1247,6 @@ static int phase4_lost(vol_t *fs)
     { fix_verbose_flush(); prt_str("  (skipped)\r\n"); return 0; }
 
     fat1 = fs->fatbase;
-    fat2 = fat1 + (LBA_t)fs->fsize;
 
     /* Open one DSS page for batched FAT reads. Both the /CONVERT
      * pre-pass and the main scan reuse the same page (one
@@ -1281,14 +1262,6 @@ static int phase4_lost(vol_t *fs)
      *    next batch_read re-issues dss_setwin_page. */
     if (!diskio_batch_open(1u)) { err_str("no page"); return -1; }
 
-    if (converting) {
-        if (phase4_premark(fs, shift, n_per, bad_marker) < 0) {
-            err_str("premark");
-            diskio_batch_close();
-            return -1;
-        }
-    }
-
     sec_idx = 0ul;
     while (sec_idx < fs->fsize) {
         DWORD remaining = fs->fsize - sec_idx;
@@ -1297,7 +1270,6 @@ static int phase4_lost(vol_t *fs)
                           : (u8)remaining;
         u8   *page;
         u8    si;
-        unsigned long dirty_mask = 0ul;
 
         fix_verbose_tick();
 
@@ -1314,7 +1286,6 @@ static int phase4_lost(vol_t *fs)
             DWORD start_c  = (shift == 2u) ? (this_sec << 7)
                                            : (this_sec << 8);
             const u8 *sec_buf = page + (UINT)si * 512u;
-            u8       *sec_buf_w = page + (UINT)si * 512u;
             UINT      cc_in;
 
             if (start_c >= fs->n_fatent) break;
@@ -1334,6 +1305,21 @@ static int phase4_lost(vol_t *fs)
                 if (v == 0ul || v == bad_marker) continue;
                 if (bitmap_get((u32)cc)) continue;
 
+                /* The batch page is only a CANDIDATE source: a bulk
+                 * read used to spot orphan heads quickly. Re-read the
+                 * entry through the single-sector path before acting,
+                 * so the value we free/convert comes from the same
+                 * path every write goes through -- never a byte left
+                 * over from the bulk scan. */
+                chain_invalidate();
+                v = chain_get_entry(fs, cc);
+                if (v == CHAIN_READ_ERROR) {
+                    err_str("FAT read");
+                    diskio_batch_close();
+                    return -1;
+                }
+                if (v == 0ul || v == bad_marker) continue;
+
                 if (converting) {
                     /* cc is an orphan chain head. Walk + create
                      * FILE####.CHK in the root. The helpers use
@@ -1345,7 +1331,6 @@ static int phase4_lost(vol_t *fs)
                     WORD  e_off;
                     BYTE  name[11];
 
-                    chain_invalidate();
                     chain_len = phase4_walk_chain(fs, cc);
 
                     if (chain_len == 0ul) {
@@ -1374,52 +1359,22 @@ static int phase4_lost(vol_t *fs)
                         }
                     }
                 } else {
-                    /* Free mode: zero entry in the batch page; the
-                     * sector will be flushed at end of batch. */
+                    /* Free mode: zero the orphan's entry through
+                     * fix_fat_set (single-sector read-modify-write,
+                     * mirrored into FAT 2). Never write batch-page
+                     * sectors back wholesale -- the batch page is a
+                     * read-only bulk-scan buffer; flushing it would
+                     * clobber the single-sector repairs. */
                     if (fix_enabled()) {
-                        sec_buf_w[pos]      = 0u;
-                        sec_buf_w[pos + 1u] = 0u;
-                        if (shift == 2u) {
-                            sec_buf_w[pos + 2u]  = 0u;
-                            sec_buf_w[pos + 3u] &= 0xF0u;
+                        if (!fix_fat_set(fs, cc, 0ul)) {
+                            err_str("FAT free");
+                            diskio_batch_close();
+                            return -1;
                         }
-                        dirty_mask |= (1ul << si);
                     }
                     lost_n++;
                 }
             }
-        }
-
-        /* Flush dirty FAT sectors. Copy each to g_sect_a first so the
-         * write reads from a stable buffer (bios_drv_write may move
-         * WIN3 from under us mid-loop). After all writes we tell the
-         * batch layer the WIN3 mapping is unknown so the next
-         * batch_read re-maps the page. */
-        if (dirty_mask != 0ul) {
-            for (si = 0u; si < batch; si++) {
-                if ((dirty_mask & (1ul << si)) == 0ul) continue;
-                /* Re-map fresh in case a previous iteration's
-                 * disk_write disturbed WIN3. */
-                diskio_batch_invalidate();
-                page = diskio_batch_map(0u);
-                {
-                    UINT k;
-                    const u8 *src = page + (UINT)si * 512u;
-                    for (k = 0u; k < 512u; k++) g_sect_a[k] = src[k];
-                }
-                if (!fix_write(fat1 + (LBA_t)sec_idx + (LBA_t)si,
-                               g_sect_a, 1u)) {
-                    diskio_batch_close();
-                    return -1;
-                }
-                if (fs->n_fats == 2u
-                    && !fix_write(fat2 + (LBA_t)sec_idx + (LBA_t)si,
-                                  g_sect_a, 1u)) {
-                    diskio_batch_close();
-                    return -1;
-                }
-            }
-            diskio_batch_invalidate();
         }
 
         sec_idx += (DWORD)batch;
@@ -1455,8 +1410,7 @@ phase4_report:
 
 int scan_run(vol_t *fs)
 {
-    scan_totals_t t;
-    int           lost_rc;
+    int lost_rc;
 
     prt_str("Phase 3: directory and chain walk\r\n");
 
@@ -1469,7 +1423,20 @@ int scan_run(vol_t *fs)
     bitmap_set(0u);
     bitmap_set(1u);
 
-    if (walk_tree(fs, &t) < 0) {
+#if CHKDSK_FAT32
+    /* Claim the FAT32 root directory chain. FAT12/16 roots live in a
+     * reserved region outside the cluster heap, but the FAT32 root is
+     * an ordinary cluster chain -- without claiming it here, phase 4
+     * would count the root's own clusters as lost, and a /F run would
+     * free (or /F /C convert into a CHK file) the root directory
+     * itself. The claim-walk also EOC-terminates a rotten root chain
+     * under /F, same as any other chain repair. */
+    if (fs->fs_type == FS_FAT32) {
+        (void)phase4_walk_chain(fs, (DWORD)fs->dirbase);
+    }
+#endif
+
+    if (walk_tree(fs) < 0) {
         prt_str("  error: walk aborted\r\n");
         bitmap_release();
         return -1;
@@ -1477,22 +1444,23 @@ int scan_run(vol_t *fs)
     fix_verbose_flush();
 
     prt_str("  Totals: entries=");
-    prt_dec((unsigned long)t.entries);
+    prt_dec((unsigned long)g_totals.entries);
     prt_str(" dirs=");
-    prt_dec((unsigned long)t.dirs);
-    emit_count(" flagged=",     t.flagged);
-    emit_count(" cycles=",      t.cycles);
-    emit_count(" crosslinks=",  t.cross_links);
-    emit_count(" broken=",      t.broken_chains);
-    emit_count(" truncated=",   t.truncated);
-    emit_count(" excess=",      t.excess);
-    emit_count(" depth-cap=",   t.depth_capped);
+    prt_dec((unsigned long)g_totals.dirs);
+    emit_count(" flagged=",     g_totals.flagged);
+    emit_count(" cycles=",      g_totals.cycles);
+    emit_count(" crosslinks=",  g_totals.cross_links);
+    emit_count(" broken=",      g_totals.broken_chains);
+    emit_count(" truncated=",   g_totals.truncated);
+    emit_count(" excess=",      g_totals.excess);
+    emit_count(" depth-cap=",   g_totals.depth_capped);
     prt_nl();
 
     lost_rc = phase4_lost(fs);
 
     bitmap_release();
     if (lost_rc < 0) return -1;
-    return (int)(t.flagged + t.cycles + t.cross_links + t.broken_chains
-               + t.truncated + t.excess) + lost_rc;
+    return (int)(g_totals.flagged + g_totals.cycles + g_totals.cross_links
+               + g_totals.broken_chains + g_totals.truncated
+               + g_totals.excess) + lost_rc;
 }

@@ -13,6 +13,7 @@
 #include "diskio_dss.h"
 #include "diskio_batch.h"
 #include "bitmap.h"
+#include "sectbuf.h"
 
 #define BATCH_WINDOW   3u           /* WIN3 = 0xC000..0xFFFF */
 #define BATCH_WIN_BASE 0xC000u
@@ -65,8 +66,11 @@ u8 *diskio_batch_map(u8 page_idx)
         g_cur_page = page_idx;
         /* WIN3 now has a batch page. bitmap shares WIN3 too -- it must
          * re-map on its next access, otherwise its bitmap_get reads from
-         * batch FAT data and returns wrong reachability bits. */
+         * batch FAT data and returns wrong reachability bits.
+         *
+         * sectbuf shares WIN3 too -- same invalidation rule applies. */
         bitmap_invalidate();
+        sectbuf_invalidate();
     }
     return (u8 *)BATCH_WIN_BASE;
 }
@@ -81,6 +85,7 @@ int diskio_batch_read(unsigned long lba, u8 count, u8 page_idx)
     u8 *base;
 
     if (count == 0u || count > BATCH_SECTORS_PER_PAGE) return 0;
+
     base = diskio_batch_map(page_idx);
     if (base == (u8 *)0) return 0;
     if (diskio_dss_read_batch(lba, count, base) != 0u) return 0;

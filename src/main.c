@@ -22,6 +22,7 @@
 #include "fat.h"
 #include "scan.h"
 #include "fix.h"
+#include "sectbuf.h"
 #include "prt.h"
 
 #ifndef CHKDISK_VERSION
@@ -174,6 +175,15 @@ void main(void)
     letter = drive_arg[0];
     if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
     print_banner();
+
+    /* sectbuf borrows a DSS page so its 512 B don't sit in static _DATA;
+     * must be initialised before the first disk_read. */
+    if (!sectbuf_init()) {
+        prt_str("no page memory for sectbuf\r\n");
+        dss_exit(255u);
+        return;
+    }
+
     code = dispatch(letter);
 
     /* If /F actually wrote anything, force DSS to drop its cached BPB
@@ -182,5 +192,6 @@ void main(void)
      * our repairs with stale buffers. specs.md:288 -- mandatory. */
     if (fix_any_applied()) diskio_dss_rescan();
 
+    sectbuf_release();
     dss_exit(code);
 }

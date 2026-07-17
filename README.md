@@ -20,14 +20,11 @@ A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the
 * Excess-length chains — write EOC at the expected last cluster, free the trailing chain.
 * Lost clusters — free them, or with `/F /C` link each chain into a `FILE####.CHK` entry in the root for manual recovery.
 
-## Build targets
+## Build target
 
-The `Makefile` builds two binaries from the same source tree, each tuned to fit the Sprinter's 32 KB code+data window:
+The `Makefile` builds a single binary, **`chkdsk.exe`**, covering FAT12, FAT16 and FAT32 for floppies and IDE / CF / SD partitions alike. The FAT type is detected at runtime from the BPB.
 
-* **`chkdsk.exe`**  — FAT16 + FAT32, for IDE / CF / SD partitions.
-* **`chkdsk12.exe`** — FAT12 only, for floppies and very small media.
-
-Run the appropriate binary for the target volume; both share the same command-line and behave identically on the FAT types they support.
+The binary uses the SDK's extended WIN0..WIN2 memory layout (code-biased): code and rodata span all three low windows (~44 KB budget), while the RST trampolines, data and stack sit at the top of WIN2. This lifts the old 32 KB code+data ceiling that had previously forced a split into separate FAT12 and FAT16/32 binaries.
 
 ## Building from source
 
@@ -73,12 +70,11 @@ A native Windows build without MSYS2 is possible but requires manually invoking 
 
 After `make`:
 
-* `chkdsk.exe` — FAT16/32 binary, copy to the Sprinter and run as `CHKDSK <drive>:`.
-* `chkdsk12.exe` — FAT12 binary, copy to the Sprinter and run as `CHKDSK12 <drive>:`.
+* `chkdsk.exe` — the single FAT12/16/32 binary, copy to the Sprinter and run as `CHKDSK <drive>:`.
 
 For a packaged release run `run/create_floppy_image.sh`, which produces:
 
-* `build/chkdsk.img` — bootable 1.44 MB FAT12 floppy image with both binaries and the user guides.
+* `build/chkdsk.img` — bootable 1.44 MB FAT12 floppy image with the binary and the user guides.
 * `dist/checkdsk.zip` — the same payload as a flat archive.
 
 Local-machine overrides (e.g. an `SDCC_BIN_DIR` pointing at a non-default install) belong in an untracked `run/create_floppy_image.local.sh` wrapper that exec's the main script with environment set; see the file in this repo for an example pattern.
