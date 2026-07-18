@@ -17,8 +17,9 @@ static u8    g_fix_enabled = 0u;
 static u8    g_fix_convert = 0u;
 static u8    g_fix_verbose = 0u;
 static u8    g_fix_verbose_dirty = 0u;   /* a progress dot is on the current line */
-static DWORD g_fix_found   = 0ul;
-static DWORD g_fix_applied = 0ul;
+static DWORD g_fix_found      = 0ul;
+static DWORD g_fix_applied    = 0ul;
+static u8    g_fix_incomplete = 0u;
 
 void fix_enable(void)         { g_fix_enabled = 1u; }
 int  fix_enabled(void)        { return g_fix_enabled ? 1 : 0; }
@@ -42,15 +43,19 @@ void fix_verbose_flush(void)
         g_fix_verbose_dirty = 0u;
     }
 }
-void fix_count_found(void)   { g_fix_found++; }
-void fix_count_applied(void) { g_fix_applied++; }
-int  fix_any_found(void)     { return (g_fix_found != 0ul) ? 1 : 0; }
-int  fix_any_applied(void)   { return (g_fix_applied != 0ul) ? 1 : 0; }
+void fix_count_found(void)      { g_fix_found++; }
+void fix_count_applied(void)    { g_fix_applied++; }
+void fix_count_incomplete(void) { g_fix_incomplete = 1u; }
+int  fix_any_found(void)        { return (g_fix_found != 0ul) ? 1 : 0; }
+int  fix_any_applied(void)      { return (g_fix_applied != 0ul) ? 1 : 0; }
+int  fix_any_incomplete(void)   { return g_fix_incomplete ? 1 : 0; }
 
 int fix_write(LBA_t lba, const BYTE *buf, UINT count)
 {
     if (!g_fix_enabled) return 1;
-    return (disk_write(0u, buf, lba, count) == RES_OK) ? 1 : 0;
+    if (disk_write(0u, buf, lba, count) == RES_OK) return 1;
+    fix_count_incomplete();
+    return 0;
 }
 
 int fix_fat_set(vol_t *fs, DWORD clust, DWORD value)

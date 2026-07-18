@@ -52,6 +52,12 @@ run_case() {
         return 1
     fi
 
+    # Exit codes under /F: 0 clean, 2 all-found-fixed, 3 partially fixed
+    # -- all three are legitimate outcomes of a repair pass and may
+    # still need another pass (e.g. a fixed entry can surface a new
+    # finding on re-scan). Only 255 (fatal: scan aborted, OOM, mount
+    # failure) is a hard stop. 1 should never come back under /F --
+    # dispatch() only returns it in read-only mode.
     local args=("/F")
     [ "$mode" = "FC" ] && args=("/F" "/C")
     local i
@@ -59,7 +65,7 @@ run_case() {
         "$HOST" "$img" "${args[@]}" >>"$log" 2>&1
         rc=$?
         if [ $rc -eq 0 ]; then break; fi
-        if [ $rc -ge 2 ]; then
+        if [ $rc -eq 255 ] || [ $rc -eq 1 ]; then
             echo "$tag REPAIR ERROR (pass $i exit=$rc)"
             return 1
         fi

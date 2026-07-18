@@ -55,11 +55,23 @@ static void print_usage(void)
 static volume_t g_vol;
 static vol_t    g_fs;
 
+/* Exit codes, per specs.md "Коды возврата". 255 covers every case
+ * where the volume itself could not be checked at all (bad drive, boot
+ * sector / BPB unreadable, out of memory, aborted mid-scan) -- distinct
+ * from 1/2/3, which all mean "the check ran to completion and found
+ * (and, under /F, attempted to fix) N issues". */
+#define CHKDSK_RC_CLEAN         0u
+#define CHKDSK_RC_FOUND_UNFIXED 1u
+#define CHKDSK_RC_ALL_FIXED     2u
+#define CHKDSK_RC_PARTIAL_FIXED 3u
+#define CHKDSK_RC_FATAL         255u
+
 static u8 dispatch(char letter)
 {
     int mrc;
     int vrc;
     int total_errs;
+    int srv;
 
     total_errs = 0;
 
@@ -68,7 +80,7 @@ static u8 dispatch(char letter)
         prt_str("bad drive: ");
         prt_chr(letter);
         prt_nl();
-        return 2u;
+        return CHKDSK_RC_FATAL;
     }
 
     volume_apply(&g_vol);
@@ -82,34 +94,53 @@ static u8 dispatch(char letter)
     mrc = vol_mount(&g_fs, 0u);
     total_errs += bpb_check(&g_fs, mrc);
 
-    if (mrc == VOL_OK) {
-        if (summary_print(&g_fs, letter) != 0) {
-            vol_unmount(&g_fs);
-            return 1u;
-        }
-        total_errs += fat_check(&g_fs);
-        {
-            int srv = scan_run(&g_fs);
-            if (srv > 0) total_errs += srv;
-        }
-#if CHKDSK_FAT32
-        /* Force DSS to recompute FSInfo free_count on next mount.
-         * Done after all phase-2/4 writes so the recalc reflects the
-         * post-fix state. Gated on fix_any_applied so a clean /F run
-         * doesn't rewrite an already-correct FSInfo sector. */
-        if (fix_any_applied()) (void)fat_invalidate_fsinfo(&g_fs);
-#endif
-        vol_unmount(&g_fs);
-    } else {
+    if (mrc != VOL_OK) {
+        /* Couldn't even mount: boot sector / BPB unreadable or
+         * unsupported. bpb_check already reported why via
+         * report_mount_failure -- Phase 2-4 never ran, so this isn't
+         * "N issues found", it's "couldn't check at all". */
         prt_str("mount rc=");
         prt_dec((unsigned long)mrc);
         prt_str(" be=");
         prt_dec((unsigned long)diskio_dss_last_error());
         prt_nl();
+        fix_print_summary();
+        return CHKDSK_RC_FATAL;
     }
 
+    if (summary_print(&g_fs, letter) != 0) {
+        vol_unmount(&g_fs);
+        return CHKDSK_RC_FATAL;
+    }
+    total_errs += fat_check(&g_fs);
+
+    srv = scan_run(&g_fs);
+    if (srv < 0) {
+        /* Phase 3/4 aborted outright (cluster-bitmap allocation
+         * failure, or an I/O error mid-walk) -- scan_run already
+         * printed the specific error. The check never completed, so
+         * this is fatal, not "N issues found". */
+        vol_unmount(&g_fs);
+        fix_print_summary();
+        return CHKDSK_RC_FATAL;
+    }
+    total_errs += srv;
+
+#if CHKDSK_FAT32
+    /* Force DSS to recompute FSInfo free_count on next mount.
+     * Done after all phase-2/4 writes so the recalc reflects the
+     * post-fix state. Gated on fix_any_applied so a clean /F run
+     * doesn't rewrite an already-correct FSInfo sector. */
+    if (fix_any_applied()) (void)fat_invalidate_fsinfo(&g_fs);
+#endif
+    vol_unmount(&g_fs);
+
     fix_print_summary();
-    return (total_errs > 0 || fix_any_found()) ? 1u : 0u;
+
+    if (total_errs == 0)   return CHKDSK_RC_CLEAN;
+    if (!fix_enabled())    return CHKDSK_RC_FOUND_UNFIXED;
+    if (fix_any_incomplete()) return CHKDSK_RC_PARTIAL_FIXED;
+    return CHKDSK_RC_ALL_FIXED;
 }
 
 /* Same rationale as g_vol/g_fs above -- keep cmdbuf out of the stack.
@@ -134,7 +165,7 @@ void main(void)
 
     if (argc == 0) {
         print_usage();
-        dss_exit(2u);
+        dss_exit(CHKDSK_RC_FATAL);
         return;
     }
 
@@ -159,7 +190,7 @@ void main(void)
         }
         if (drive_arg != (char *)0) {
             prt_str("too many args\r\n");
-            dss_exit(2u);
+            dss_exit(CHKDSK_RC_FATAL);
             return;
         }
         drive_arg = g_argv[i];
@@ -168,7 +199,7 @@ void main(void)
     if (drive_arg == (char *)0 ||
         drive_arg[0] == '\0' || drive_arg[1] != ':' || drive_arg[2] != '\0') {
         prt_str("expected drive (e.g. C:)\r\n");
-        dss_exit(2u);
+        dss_exit(CHKDSK_RC_FATAL);
         return;
     }
 
@@ -180,7 +211,7 @@ void main(void)
      * must be initialised before the first disk_read. */
     if (!sectbuf_init()) {
         prt_str("no page memory for sectbuf\r\n");
-        dss_exit(255u);
+        dss_exit(CHKDSK_RC_FATAL);
         return;
     }
 

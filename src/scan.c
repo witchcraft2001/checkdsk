@@ -598,8 +598,10 @@ static int step(vol_t *fs, BYTE *depth)
                 prt_str("  WARN: name-fix skipped, sanitized name '");
                 print_sfn(new_name);
                 prt_str("' collides with an existing entry\r\n");
+                fix_count_incomplete();
             } else if (!fix_delete_preceding_lfn(sect, off, dir_start)) {
                 warn_str("name-fix skipped, long-name entry spans a sector");
+                fix_count_incomplete();
             } else if (!fix_dir_name_set(sect, off, new_name)) {
                 warn_str("name-fix");
             }

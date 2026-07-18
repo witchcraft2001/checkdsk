@@ -79,6 +79,21 @@ int  fix_any_found(void);
  * gate the post-/F BIOS DRV_DETECT rescan. */
 int  fix_any_applied(void);
 
+/* Account for a found issue that /F did NOT resolve -- either a write
+ * genuinely failed (fix_write calls this itself on disk_write failure,
+ * so every repair site that funnels through it is covered for free)
+ * or a repair site deliberately abstained (e.g. the name-sanitize
+ * pack's LFN-boundary / name-collision guards in scan.c, which call
+ * this directly since they never reach fix_write at all). NOT
+ * exhaustive: a disk_read failure inside a repair site before it ever
+ * reaches fix_write is not separately tracked (rare -- transient read
+ * fault mid-repair -- and the issue is still correctly counted as
+ * "found" either way). main.c uses this to tell exit code 2 (all
+ * found issues fixed) apart from 3 (found, some left unfixed) under
+ * /F -- best-effort, not a guarantee equivalent to a clean re-scan. */
+void fix_count_incomplete(void);
+int  fix_any_incomplete(void);
+
 /* Directory-entry patch kinds for fix_dir_patch. */
 #define FIX_DPATCH_SIZE          0u  /* set size DWORD (off+28..31) to value */
 #define FIX_DPATCH_DELETE        1u  /* mark entry deleted (off byte = 0xE5) */

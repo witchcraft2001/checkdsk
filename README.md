@@ -8,7 +8,7 @@ A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the
 
 * **Phase 1 — boot sector + BPB**: signature, sector / cluster geometry, FAT type classification by cluster count.
 * **Phase 2 — FAT tables**: every entry classified (free / in-use / BAD / EOC / invalid), FAT 1/2 mismatch detection, FAT[0] media descriptor cross-check, FAT[1] EOC + clean-shutdown / hard-error flags.
-* **Phase 3 — directory tree**: full DFS walk of every directory; entries validated for character set, attributes, cluster bounds, FAT12/16 high-cluster word, dir-size, "." / ".." cluster pointers; cluster chains validated for cycles, cross-links, broken / BAD links, truncated and excess length; LFN sequences checked for descending order, agreed checksum byte, and SFN-checksum match.
+* **Phase 3 — directory tree**: full DFS walk of every directory; entries validated for character set (including CP866 case), attributes, cluster bounds, FAT12/16 high-cluster word, dir-size, "." / ".." cluster pointers; cluster chains validated for cycles, cross-links, broken / BAD links, truncated and excess length. LFN slots are checked for internal consistency (reserved fields) only -- sequence order and SFN-checksum cross-validation were dropped to fit the memory budget; long names are always treated as opaque, never decoded or displayed.
 * **Phase 4 — lost cluster sweep**: every FAT entry compared against the in-use bitmap built during Phase 3.
 
 ## What it repairs (with `/F`)
@@ -19,6 +19,28 @@ A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the
 * Truncated / broken / cross-linked file chains — shrink the file size to the actual chain coverage.
 * Excess-length chains — write EOC at the expected last cluster, free the trailing chain.
 * Lost clusters — free them, or with `/F /C` link each chain into a `FILE####.CHK` entry in the root for manual recovery.
+* Invalid SFN characters, lowercase letters (including CP866 lowercase Cyrillic, which Estex-DSS itself cannot address by name -- see below) and a leading space — sanitized in place. Skipped (left flagged) if the sanitized name would collide with an existing entry in the same directory, or if an LFN run in front of the entry can't be resolved safely; either case prints why.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0`   | Volume is clean. |
+| `1`   | Issues found, not fixed (read-only run, i.e. without `/F`). |
+| `2`   | Issues found, all fixed (`/F` run). |
+| `3`   | Issues found, some left unfixed (`/F` run) -- see the WARN lines for why (name collision, LFN spanning a sector, a write that failed). |
+| `255` | Fatal: couldn't check the volume at all (bad drive, unreadable/unsupported boot sector or BPB, out of page memory, I/O error mid-scan). |
+
+DSS's `IF ERRORLEVEL n` is true when the actual exit code is `>= n` (same convention as MS-DOS), so a script must test from the **highest** code down -- a single `IF ERRORLEVEL 1` cannot tell "all fixed" (2) apart from "still broken" (1/3/255), because all four are `>= 1`:
+
+```
+CHKDSK C: /F
+IF ERRORLEVEL 255 GOTO Fatal
+IF ERRORLEVEL 3   GOTO Partial
+IF ERRORLEVEL 2   GOTO AllFixed
+IF ERRORLEVEL 1   GOTO FoundUnfixed
+GOTO Clean
+```
 
 ## Build target
 
