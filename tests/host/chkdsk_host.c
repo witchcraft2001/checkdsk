@@ -44,7 +44,7 @@ static vol_t g_fs;
 int main(int argc, char **argv)
 {
     const char *img = NULL;
-    int i, mrc, total_errs = 0, srv;
+    int i, mrc, total_errs = 0, frv, srv;
 
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -56,7 +56,7 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "too many args\n"); return CHKDSK_RC_FATAL; }
     }
     if (!img) {
-        fprintf(stderr, "usage: chkdsk_host <image> [/F] [/C] [/V]\n");
+        fprintf(stderr, "usage: chkdsk_host <image> [/F] [/C] [/V] [/Y]\n");
         return CHKDSK_RC_FATAL;
     }
     if (!host_disk_open(img)) return CHKDSK_RC_FATAL;
@@ -81,7 +81,13 @@ int main(int argc, char **argv)
         host_disk_flush();
         return CHKDSK_RC_FATAL;
     }
-    total_errs += fat_check(&g_fs);
+    frv = fat_check(&g_fs);
+    if (frv < 0) {
+        fix_print_summary();
+        host_disk_flush();
+        return CHKDSK_RC_FATAL;
+    }
+    total_errs += frv;
 
     srv = scan_run(&g_fs);
     if (srv < 0) {
@@ -89,6 +95,8 @@ int main(int argc, char **argv)
         return CHKDSK_RC_FATAL;
     }
     total_errs += srv;
+
+    scan_print_report(&g_fs, fat_free_clusters(), fat_bad_clusters());
 
 #if CHKDSK_FAT32
     if (fix_any_applied()) (void)fat_invalidate_fsinfo(&g_fs);

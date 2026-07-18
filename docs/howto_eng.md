@@ -10,23 +10,16 @@ partitions, and similar media accessible through the DSS BIOS.
 WHICH BINARY TO RUN
 -------------------
 
-Two builds ship together; pick the one that matches your target volume:
-
-  CHKDSK.EXE     FAT16 + FAT32. Use for IDE/CF/SD partitions and any
-                 medium larger than ~16 MB.
-
-  CHKDSK12.EXE   FAT12 only. Use for floppies and very small media
-                 (typically under ~16 MB).
-
-If you run the wrong binary you will get an "unsupported FAT type"
-diagnostic in Phase 1 and the program exits.
+A single binary, CHKDSK.EXE, covers FAT12, FAT16 and FAT32 for
+floppies and IDE / CF / SD partitions alike. The FAT type is detected
+at runtime from the BPB -- there is nothing to choose. (Earlier
+releases shipped a separate CHKDSK12.EXE for FAT12; that split is gone.)
 
 
 COMMAND LINE
 ------------
 
-  CHKDSK <drive>: [/F] [/C] [/V]
-  CHKDSK12 <drive>: [/F] [/V]
+  CHKDSK <drive>: [/F] [/C] [/V] [/Y]
 
 Drive letter is required and must be followed by a colon, e.g. C:, D:,
 A:. Letters are case-insensitive.
@@ -44,7 +37,16 @@ A:. Letters are case-insensitive.
          sweep) so you can tell the program is working on a multi-
          second scan. Cosmetic only.
 
+  /Y     With /F: assume "yes" on the one-time write warning (see
+         SAFETY NOTES) and start repairing without waiting for a
+         keypress. Meant for unattended or batch use. No effect
+         without /F.
+
   /?     Help.
+
+You can interrupt a long scan at any time by pressing ESC or Ctrl+C;
+the program stops at the next check point, leaving already-written
+repairs intact.
 
 
 WHAT EACH PHASE DOES
@@ -71,9 +73,10 @@ WHAT EACH PHASE DOES
         directory-vs-file consistency, first-cluster bounds, FAT12/16
         high-cluster word, dir-size requirement.
       * "." / ".." cluster pointers (must equal own / parent cluster).
-      * LFN slots must be in descending order, all carry the same
-        checksum byte, and the SFN that follows must reproduce that
-        checksum.
+      * LFN slots are checked only for internal consistency (reserved
+        fields). Sequence-order and SFN-checksum cross-validation were
+        dropped to fit the memory budget, so long names are treated as
+        opaque and are never decoded or displayed.
       * Cluster chain: cycles, cross-links, broken / BAD links,
         truncated chain (shorter than file size says), excess chain
         (longer than file size says).
@@ -85,6 +88,12 @@ WHAT EACH PHASE DOES
     Every FAT entry that is in-use but not reachable from any
     directory is identified as a lost cluster. Reported by count;
     repaired with /F or /F /C.
+
+After Phase 4 the program prints a classic chkdsk-style space report:
+total disk space, bytes in user files and in directories, bytes in bad
+sectors, bytes free, and the allocation-unit geometry. Only the volume
+serial number is shown, not the label -- DSS does not expose the label
+through the mount structure.
 
 
 REPAIRS
@@ -123,6 +132,16 @@ issue noticed regardless of /F.
     chain is linked into a FILE####.CHK entry in the root directory
     so its content can be recovered.
 
+  Invalid SFN characters, lowercase letters, leading space
+    The 8.3 name is sanitized in place: forbidden bytes become '_',
+    lowercase ASCII and lowercase CP866 Cyrillic are folded to upper
+    case (the latter matters because DSS itself cannot open a file
+    whose stored name holds raw lowercase Cyrillic). The fix is
+    skipped -- and the reason printed -- if the cleaned name would
+    collide with another entry in the same directory, or if an LFN run
+    in front of the entry cannot be resolved without crossing a sector
+    boundary.
+
 
 WHAT IS NOT REPAIRED
 --------------------
@@ -135,9 +154,10 @@ WHAT IS NOT REPAIRED
     is shrunk, but the program does not split chains into separate
     copies. The first file the walker encountered keeps the cluster.
 
-  * LFN sequence breakage is reported but not auto-repaired -- you
-    can delete the file from a host system and restore from backup,
-    or run a more capable tool.
+  * Long file names. LFN slots are validated only for internal
+    consistency, never decoded; a broken long name is not repaired.
+    The underlying 8.3 name stays usable -- fix the long name from a
+    host system if you need it.
 
 
 OUTPUT EXAMPLE
@@ -162,6 +182,18 @@ OUTPUT EXAMPLE
   Phase 4: lost clusters
     No issues
 
+  Volume Serial Number is 4414-6469
+
+    1073512448 bytes total disk space
+     172916736 bytes in 2363 user files
+      18972672 bytes in 579 directories
+             0 bytes in bad sectors
+     881623040 bytes available on disk
+
+         32768 bytes in each allocation unit
+         32761 total allocation units on disk
+         26905 available allocation units on disk
+
 When something is wrong, flagged entries appear in their phase's
 section, prefixed by their full path:
 
@@ -169,12 +201,28 @@ section, prefixed by their full path:
   /OTHER/SUB . * dot-clust got=12 expect=42
 
 
-EXIT CODE
----------
+EXIT CODES
+----------
 
-  0 -- everything clean, no issues found.
-  1 -- at least one issue was reported (and possibly repaired with /F).
-  2 -- bad arguments or the drive could not be opened.
+  0   -- volume is clean.
+  1   -- issues found, not fixed (read-only run, i.e. without /F).
+  2   -- issues found, all fixed (/F run).
+  3   -- issues found, some left unfixed (/F run) -- see the WARN
+         lines for why (name collision, LFN spanning a sector, a write
+         that failed).
+  255 -- fatal: the volume could not be checked at all (bad drive,
+         unreadable boot sector or BPB, out of page memory, an I/O
+         error mid-scan).
+
+DSS's `IF ERRORLEVEL n` is true when the code is >= n (as in MS-DOS),
+so a batch script must test from the highest code down:
+
+  CHKDSK C: /F /Y
+  IF ERRORLEVEL 255 GOTO Fatal
+  IF ERRORLEVEL 3   GOTO Partial
+  IF ERRORLEVEL 2   GOTO AllFixed
+  IF ERRORLEVEL 1   GOTO FoundUnfixed
+  GOTO Clean
 
 
 SAFETY NOTES
@@ -182,6 +230,13 @@ SAFETY NOTES
 
   * Always run the read-only mode first to see what the tool wants to
     fix. Only re-run with /F once the report makes sense to you.
+
+  * Before the first write, a /F run prints
+      WARNING: about to write to disk. Press Y to continue, any other
+      key to abort.
+    Any key other than Y cancels the rest of the run -- nothing more
+    is written and the exit code reads as a read-only run. Pass /Y to
+    skip this prompt for unattended use.
 
   * The repairs are irreversible. There is no undo. Make a backup of
     the volume's contents before running with /F if the data is

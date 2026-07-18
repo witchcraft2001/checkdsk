@@ -72,6 +72,7 @@ static u8 dispatch(char letter)
     int mrc;
     int vrc;
     int total_errs;
+    int frv;
     int srv;
 
     total_errs = 0;
@@ -113,7 +114,15 @@ static u8 dispatch(char letter)
         vol_unmount(&g_fs);
         return CHKDSK_RC_FATAL;
     }
-    total_errs += fat_check(&g_fs);
+    frv = fat_check(&g_fs);
+    if (frv < 0) {
+        /* Phase 2 hit an unrecoverable FAT read -- the same FAT feeds
+         * Phase 3/4, so the check can't complete. Fatal, not "N found". */
+        vol_unmount(&g_fs);
+        fix_print_summary();
+        return CHKDSK_RC_FATAL;
+    }
+    total_errs += frv;
 
     srv = scan_run(&g_fs);
     if (srv < 0) {
@@ -126,6 +135,9 @@ static u8 dispatch(char letter)
         return CHKDSK_RC_FATAL;
     }
     total_errs += srv;
+
+    /* Classic end-of-run space report -- before unmount (reads fs). */
+    scan_print_report(&g_fs, fat_free_clusters(), fat_bad_clusters());
 
 #if CHKDSK_FAT32
     /* Force DSS to recompute FSInfo free_count on next mount.

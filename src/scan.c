@@ -102,6 +102,16 @@ typedef struct {
     DWORD truncated;     /* file size > chain length */
     DWORD excess;        /* file size < chain length */
     DWORD depth_capped;
+    /* End-of-run classic space report (scan_print_report). Counted
+     * per live entry from its walked chain length, so a file/dir with
+     * a broken chain contributes only the clusters actually reachable
+     * -- the same accounting Phase 4 uses. dir_entries counts every
+     * directory entry seen (unlike `dirs`, which counts only those
+     * successfully descended). */
+    DWORD files;         /* live regular-file entries */
+    DWORD file_clusters; /* clusters claimed by files */
+    DWORD dir_entries;   /* live directory entries */
+    DWORD dir_clusters;  /* clusters claimed by directories */
 } scan_totals_t;
 
 /* Uninit at boot is fine: walk_tree zeroes every field before use. */
@@ -489,6 +499,21 @@ static int step(vol_t *fs, BYTE *depth)
         }
     }
 
+    /* Space accounting for the end-of-run report. Dots and LFN slots
+     * were already filtered out above; guard 0xE5 here since a deleted
+     * slot can carry a stale ATTR_DIR bit. chain_len is 0 for entries
+     * with no valid first cluster (empty file, or out-of-range clust),
+     * so those contribute a count but no clusters, which is correct. */
+    if (ent[0] != 0xE5u) {
+        if (is_file) {
+            t->files++;
+            t->file_clusters += chain_len;
+        } else if ((ent[11] & ATTR_DIR) && !(ent[11] & ATTR_VOLID)) {
+            t->dir_entries++;
+            t->dir_clusters += chain_len;
+        }
+    }
+
     /* Peek at the first cluster of any ATTR_DIR entry that has a usable
      * cluster pointer: the result drives both the dir-corrupt repair
      * (real subdir vs file-masquerading-as-dir) and the descent guard.
@@ -772,6 +797,10 @@ static int walk_tree(vol_t *fs)
     g_totals.truncated     = 0ul;
     g_totals.excess        = 0ul;
     g_totals.depth_capped  = 0ul;
+    g_totals.files         = 0ul;
+    g_totals.file_clusters = 0ul;
+    g_totals.dir_entries   = 0ul;
+    g_totals.dir_clusters  = 0ul;
 
     depth = 0u;
     /* Root frame: start_cluster only used by dot validation, which is
@@ -1569,4 +1598,67 @@ int scan_run(vol_t *fs)
     return (int)(g_totals.flagged + g_totals.cycles + g_totals.cross_links
                + g_totals.broken_chains + g_totals.truncated
                + g_totals.excess) + lost_rc;
+}
+
+/* Classic chkdsk-style space report (specs.md "Отчёт в конце работы").
+ * free/bad cluster counts come from Phase 2 (fat_free_clusters /
+ * fat_bad_clusters, passed in so scan.c need not depend on fat.c); the
+ * file/dir tallies come from the Phase 3 walk above. Must run before
+ * vol_unmount (it reads fs geometry). Byte figures are cluster counts
+ * shifted by csize_shift+9 and printed as the low 32 bits -- same
+ * limitation as summary_print, fine up to 4 GB. On a corrupt volume
+ * the file/dir/bad/free lines need not sum to the total: the shortfall
+ * is exactly the lost / cross-linked clusters Phase 4 reports, so this
+ * is a snapshot of the scanned state, not a forced balance. The FAT
+ * volume label isn't tracked in vol_t, so only the serial is shown. */
+void scan_print_report(vol_t *fs, DWORD free_clusters, DWORD bad_clusters)
+{
+    BYTE  csh            = (BYTE)(fs->csize_shift + 9u);
+    DWORD cluster_bytes  = (DWORD)fs->csize << 9;
+    DWORD total_clusters = fs->n_fatent - 2ul;
+
+    prt_nl();
+    prt_str("Volume Serial Number is ");
+    prt_hex((fs->volid >> 16) & 0xFFFFul, 4u);
+    prt_chr('-');
+    prt_hex(fs->volid & 0xFFFFul, 4u);
+    prt_nl();
+    prt_nl();
+
+    prt_str("  ");
+    prt_dec((unsigned long)(total_clusters << csh));
+    prt_str(" bytes total disk space\r\n");
+
+    prt_str("  ");
+    prt_dec((unsigned long)(g_totals.file_clusters << csh));
+    prt_str(" bytes in ");
+    prt_dec((unsigned long)g_totals.files);
+    prt_str(" user files\r\n");
+
+    prt_str("  ");
+    prt_dec((unsigned long)(g_totals.dir_clusters << csh));
+    prt_str(" bytes in ");
+    prt_dec((unsigned long)g_totals.dir_entries);
+    prt_str(" directories\r\n");
+
+    prt_str("  ");
+    prt_dec((unsigned long)(bad_clusters << csh));
+    prt_str(" bytes in bad sectors\r\n");
+
+    prt_str("  ");
+    prt_dec((unsigned long)(free_clusters << csh));
+    prt_str(" bytes available on disk\r\n");
+
+    prt_nl();
+    prt_str("  ");
+    prt_dec((unsigned long)cluster_bytes);
+    prt_str(" bytes in each allocation unit\r\n");
+
+    prt_str("  ");
+    prt_dec((unsigned long)total_clusters);
+    prt_str(" total allocation units on disk\r\n");
+
+    prt_str("  ");
+    prt_dec((unsigned long)free_clusters);
+    prt_str(" available allocation units on disk\r\n");
 }

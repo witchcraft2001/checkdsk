@@ -19,9 +19,17 @@
 
 #include "vol.h"
 
-/* Returns the number of issues found (0 = clean). Errors and warnings
- * print to stdout in compact form. */
+/* Returns the number of issues found (0 = clean), or -1 if a FAT
+ * sector read failed mid-scan (fatal -- the same FAT feeds Phase 3/4).
+ * Errors and warnings print to stdout in compact form. */
 int fat_check(vol_t *fs);
+
+/* Free / bad cluster counts from the last fat_check, for the
+ * end-of-run classic space report. Valid only after a fat_check that
+ * returned >= 0; both read 0 before the first call or after a fatal
+ * (-1) Phase 2. */
+DWORD fat_free_clusters(void);
+DWORD fat_bad_clusters(void);
 
 #if CHKDSK_FAT32
 /* On FAT32, mark FSI_Free_Count and FSI_Nxt_Free as "unknown"

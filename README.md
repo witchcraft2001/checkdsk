@@ -11,6 +11,8 @@ A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the
 * **Phase 3 — directory tree**: full DFS walk of every directory; entries validated for character set (including CP866 case), attributes, cluster bounds, FAT12/16 high-cluster word, dir-size, "." / ".." cluster pointers; cluster chains validated for cycles, cross-links, broken / BAD links, truncated and excess length. LFN slots are checked for internal consistency (reserved fields) only -- sequence order and SFN-checksum cross-validation were dropped to fit the memory budget; long names are always treated as opaque, never decoded or displayed.
 * **Phase 4 — lost cluster sweep**: every FAT entry compared against the in-use bitmap built during Phase 3.
 
+At the end of a run it prints a classic chkdsk-style space report: total disk space, bytes in user files and directories, bytes in bad sectors, bytes free, and the allocation-unit geometry. (The FAT volume label isn't shown — only the serial number — because DSS doesn't expose it through the mount structure.)
+
 ## What it repairs (with `/F`)
 
 * FAT 1/2 mismatch — copy FAT 1 over FAT 2.

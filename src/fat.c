@@ -23,6 +23,15 @@
 
 #define SECTOR_SIZE 512u
 
+/* Phase 2 cluster tallies, retained for the end-of-run classic report
+ * (scan_print_report reads them via the accessors). Set once at the end
+ * of a successful fat_check; left at 0 if Phase 2 bailed out fatally. */
+static DWORD g_free_clusters = 0ul;
+static DWORD g_bad_clusters  = 0ul;
+
+DWORD fat_free_clusters(void) { return g_free_clusters; }
+DWORD fat_bad_clusters(void)  { return g_bad_clusters; }
+
 /* Cheap sum across a 512-byte sector. Lets us detect that two FAT
  * copies differ without holding both in RAM simultaneously. */
 static unsigned long sec_sum(const u8 *p)
@@ -477,6 +486,7 @@ int fat_invalidate_fsinfo(vol_t *fs)
 int fat_check(vol_t *fs)
 {
     int   errs = 0;
+    int   rc   = 0;
     cnt_t c;
 
     prt_str("Phase 2: FAT tables\r\n");
@@ -485,12 +495,12 @@ int fat_check(vol_t *fs)
 
 #if CHKDSK_FAT12
     if (fs->fs_type == FS_FAT12) {
-        check_fat12(fs, &errs, &c);
+        rc = check_fat12(fs, &errs, &c);
     } else
 #endif
 #if CHKDSK_FAT16 || CHKDSK_FAT32
     if (fs->fs_type == FS_FAT16 || fs->fs_type == FS_FAT32) {
-        check_fat_wide(fs, &errs, &c, fs->fs_type == FS_FAT32);
+        rc = check_fat_wide(fs, &errs, &c, fs->fs_type == FS_FAT32);
     } else
 #endif
     {
@@ -498,7 +508,20 @@ int fat_check(vol_t *fs)
         return errs;
     }
 
+    if (rc < 0) {
+        /* A FAT sector read failed mid-scan. Phase 3/4 read the very
+         * same FAT via chain_get_entry and would only cascade garbage,
+         * so signal fatal (the sub-check already printed the specific
+         * error) -- dispatch escalates this to CHKDSK_RC_FATAL instead
+         * of mislabelling it "N issues found". Same silent-failure
+         * class as the scan_run<0 case handled in main.c's dispatch. */
+        return -1;
+    }
+
     check_special_entries(fs, &errs);
+
+    g_free_clusters = c.free_n;
+    g_bad_clusters  = c.bad_n;
 
     prt_str("  free=");
     prt_dec(c.free_n);

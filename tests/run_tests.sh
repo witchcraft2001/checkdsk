@@ -201,6 +201,47 @@ for fs in "${fstypes[@]}"; do
     fi
 done
 
+# End-of-run classic space report: cross-check that scan_print_report
+# wired the right data by comparing its "allocation units" figures
+# against the independently-printed pre-scan geometry and Phase 2 free
+# count, and that the byte figures equal units*cluster_size. Runs on a
+# clean image so the identity free+files+dirs+bad == total holds exactly.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-report.img"
+    tag="[$fs/report]"
+    rout="$WORK/$fs-report.out"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    "$HOST" "$img" >"$rout" 2>>"$log"
+
+    # Output is CRLF-terminated; strip \r so a value that lands as the
+    # last field on its line doesn't carry a trailing carriage return.
+    strip() { tr -d '\r'; }
+    tot_units=$(grep 'total allocation units'     "$rout" | awk '{print $1}' | strip)
+    avail_units=$(grep 'available allocation units' "$rout" | awk '{print $1}' | strip)
+    unit_sz=$(grep 'bytes in each allocation unit'  "$rout" | awk '{print $1}' | strip)
+    tot_bytes=$(grep 'bytes total disk space'       "$rout" | awk '{print $1}' | strip)
+    pre_total=$(grep 'Total clusters:'              "$rout" | awk '{print $3}' | strip)
+    free_ph2=$(grep -o 'free=[0-9]*'                "$rout" | head -1 | cut -d= -f2 | strip)
+
+    if [ -z "$tot_units" ] || [ -z "$avail_units" ] || [ -z "$unit_sz" ]; then
+        echo "$tag FAIL: report block missing or malformed"
+        tail -20 "$rout" | sed 's/^/    /'
+        fail=$((fail+1)); failures+=("$fs/report/missing")
+    elif [ "$tot_units" != "$pre_total" ]; then
+        echo "$tag FAIL: total units $tot_units != pre-scan clusters $pre_total"
+        fail=$((fail+1)); failures+=("$fs/report/total")
+    elif [ "$avail_units" != "$free_ph2" ]; then
+        echo "$tag FAIL: available units $avail_units != Phase 2 free $free_ph2"
+        fail=$((fail+1)); failures+=("$fs/report/free")
+    elif [ "$tot_bytes" != "$((tot_units * unit_sz))" ]; then
+        echo "$tag FAIL: total bytes $tot_bytes != units*size $((tot_units * unit_sz))"
+        fail=$((fail+1)); failures+=("$fs/report/bytes")
+    else
+        echo "$tag ok (units=$tot_units free=$avail_units, files+dirs bytes reported)"
+        pass=$((pass+1))
+    fi
+done
+
 # Each case runs under three I/O models, so a repair must be correct
 # against all of them:
 #   plain  -- separate host buffers (fast, catches pure logic bugs)

@@ -22,4 +22,12 @@
  * fatal error like out-of-memory for the bitmap. */
 int scan_run(vol_t *fs);
 
+/* Print the classic end-of-run space report (total / in files / in
+ * dirs / bad / free, plus allocation-unit geometry). Uses the file and
+ * directory tallies gathered by the most recent scan_run, plus the
+ * free / bad cluster counts passed in (from fat_free_clusters /
+ * fat_bad_clusters). Must be called while `fs` is still mounted --
+ * vol_unmount zeroes it. */
+void scan_print_report(vol_t *fs, DWORD free_clusters, DWORD bad_clusters);
+
 #endif /* CHKDSK_SCAN_H */
