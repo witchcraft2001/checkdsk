@@ -8,7 +8,7 @@ A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the
 
 * **Phase 1 — boot sector + BPB**: signature, sector / cluster geometry, FAT type classification by cluster count.
 * **Phase 2 — FAT tables**: every entry classified (free / in-use / BAD / EOC / invalid), FAT 1/2 mismatch detection, FAT[0] media descriptor cross-check, FAT[1] EOC + clean-shutdown / hard-error flags.
-* **Phase 3 — directory tree**: full DFS walk of every directory; entries validated for character set (including CP866 case), attributes, cluster bounds, FAT12/16 high-cluster word, dir-size, "." / ".." cluster pointers; cluster chains validated for cycles, cross-links, broken / BAD links, truncated and excess length. LFN slots are checked for internal consistency (reserved fields) only -- sequence order and SFN-checksum cross-validation were dropped to fit the memory budget; long names are always treated as opaque, never decoded or displayed.
+* **Phase 3 — directory tree**: full DFS walk of every directory; entries validated for character set (including CP866 case), attributes, cluster bounds, FAT12/16 high-cluster word, dir-size, "." / ".." cluster pointers; cluster chains validated for cycles, cross-links, broken / BAD links, truncated and excess length. Current-format LFN groups are fully validated: slot order and bounds, NUL / 0xFFFF padding, a single consistent checksum across the group, that checksum matching the SFN it precedes, forbidden UCS-2 characters, required-zero fields, and groups left orphaned by a missing SFN. Reserved future LFN dirent types are preserved and ignored. Long names are validated but never decoded, so paths always print the 8.3 name.
 * **Phase 4 — lost cluster sweep**: every FAT entry compared against the in-use bitmap built during Phase 3.
 
 At the end of a run it prints a classic chkdsk-style space report: total disk space, bytes in user files and directories, bytes in bad sectors, bytes free, and the allocation-unit geometry. (The FAT volume label isn't shown — only the serial number — because DSS doesn't expose it through the mount structure.)
@@ -21,7 +21,8 @@ At the end of a run it prints a classic chkdsk-style space report: total disk sp
 * Truncated / broken / cross-linked file chains — shrink the file size to the actual chain coverage.
 * Excess-length chains — write EOC at the expected last cluster, free the trailing chain.
 * Lost clusters — free them, or with `/F /C` link each chain into a `FILE####.CHK` entry in the root for manual recovery.
-* Invalid SFN characters, lowercase letters (including CP866 lowercase Cyrillic, which Estex-DSS itself cannot address by name -- see below) and a leading space — sanitized in place. Skipped (left flagged) if the sanitized name would collide with an existing entry in the same directory, or if an LFN run in front of the entry can't be resolved safely; either case prints why.
+* Invalid SFN characters, lowercase letters (including CP866 lowercase Cyrillic, which Estex-DSS itself cannot address by name -- see below) and a leading space — sanitized in place. If a valid LFN group sits in front of the entry, its checksum is restamped for the new name so the long name survives the rename, including across sector or directory-cluster boundaries. Skipped (left flagged) only if the sanitized name would collide with an existing entry in the same directory or an I/O error prevents the update.
+* Broken or orphaned LFN groups (bad slot order, padding, checksum or forbidden characters; missing SFN) — deleted across sector/cluster boundaries, leaving an associated 8.3 name intact and usable.
 
 Before the first sector actually gets written, `/F` shows `WARNING: about to write to disk. Press Y to continue, any other key to abort.` Any answer other than `Y` cancels for the rest of the run -- everything already found still gets reported, nothing more gets written, and the exit code reads as if `/F` had not been given at all. Pass `/Y` to assume yes and skip the prompt (for unattended/batch use).
 
@@ -32,7 +33,7 @@ Before the first sector actually gets written, `/F` shows `WARNING: about to wri
 | `0`   | Volume is clean. |
 | `1`   | Issues found, not fixed (read-only run, i.e. without `/F`). |
 | `2`   | Issues found, all fixed (`/F` run). |
-| `3`   | Issues found, some left unfixed (`/F` run) -- see the WARN lines for why (name collision, LFN spanning a sector, a write that failed). |
+| `3`   | Issues found, some left unfixed (`/F` run) -- see the WARN lines for why (name collision or an I/O failure). |
 | `255` | Fatal: couldn't check the volume at all (bad drive, unreadable/unsupported boot sector or BPB, out of page memory, I/O error mid-scan). |
 
 DSS's `IF ERRORLEVEL n` is true when the actual exit code is `>= n` (same convention as MS-DOS), so a script must test from the **highest** code down -- a single `IF ERRORLEVEL 1` cannot tell "all fixed" (2) apart from "still broken" (1/3/255), because all four are `>= 1`:

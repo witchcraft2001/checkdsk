@@ -25,6 +25,8 @@ static u32      g_img_secs  = 0;
 static u32      g_part_off  = 0;
 static char     g_img_path[1024];
 static int      g_dirty     = 0;
+static long     g_write_calls = 0;
+static long     g_fail_write_n = -1;
 
 int host_disk_open(const char *path)
 {
@@ -80,7 +82,15 @@ DRESULT disk_read(BYTE pdrv, BYTE *buf, LBA_t sector, UINT count)
 
 DRESULT disk_write(BYTE pdrv, const BYTE *buf, LBA_t sector, UINT count)
 {
+    const char *fail_env;
     (void)pdrv;
+    if (g_fail_write_n < 0) {
+        fail_env = getenv("CHKDSK_FAIL_WRITE_N");
+        g_fail_write_n = fail_env ? strtol(fail_env, NULL, 10) : 0;
+    }
+    g_write_calls++;
+    if (g_fail_write_n > 0 && g_write_calls == g_fail_write_n)
+        return RES_ERROR;
     if ((u32)sector + g_part_off + count > g_img_secs) return RES_ERROR;
     memcpy(g_img + ((size_t)(sector + g_part_off) * 512), buf, (size_t)count * 512);
     g_dirty = 1;

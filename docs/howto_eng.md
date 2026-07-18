@@ -73,10 +73,13 @@ WHAT EACH PHASE DOES
         directory-vs-file consistency, first-cluster bounds, FAT12/16
         high-cluster word, dir-size requirement.
       * "." / ".." cluster pointers (must equal own / parent cluster).
-      * LFN slots are checked only for internal consistency (reserved
-        fields). Sequence-order and SFN-checksum cross-validation were
-        dropped to fit the memory budget, so long names are treated as
-        opaque and are never decoded or displayed.
+      * Current-format LFN (long name) groups: slot order and bounds,
+        NUL / 0xFFFF padding, one consistent checksum across the group,
+        that checksum matching the short name behind it, forbidden
+        UCS-2 characters, required-zero fields, and groups left
+        orphaned with no short name. Reserved future LFN dirent types
+        are preserved and ignored. The names themselves are never
+        decoded, so paths always print the 8.3 name.
       * Cluster chain: cycles, cross-links, broken / BAD links,
         truncated chain (shorter than file size says), excess chain
         (longer than file size says).
@@ -136,11 +139,20 @@ issue noticed regardless of /F.
     The 8.3 name is sanitized in place: forbidden bytes become '_',
     lowercase ASCII and lowercase CP866 Cyrillic are folded to upper
     case (the latter matters because DSS itself cannot open a file
-    whose stored name holds raw lowercase Cyrillic). The fix is
+    whose stored name holds raw lowercase Cyrillic). If a valid long
+    name sits in front of the entry, its checksum is restamped for the
+    new short name, so the long name survives the rename. The fix is
     skipped -- and the reason printed -- if the cleaned name would
-    collide with another entry in the same directory, or if an LFN run
-    in front of the entry cannot be resolved without crossing a sector
-    boundary.
+    collide with another entry in the same directory, or if an I/O
+    error prevents the update. Groups crossing sector or directory-
+    cluster boundaries are supported.
+
+  Broken long-name (LFN) groups
+    A group whose slot order, padding, checksum or characters are
+    corrupt is deleted outright, including across sector or directory-
+    cluster boundaries. The long name is lost, but the 8.3 name behind
+    it stays intact and the file remains fully accessible. An orphaned
+    group with no short name behind it is deleted as well.
 
 
 WHAT IS NOT REPAIRED
@@ -154,10 +166,9 @@ WHAT IS NOT REPAIRED
     is shrunk, but the program does not split chains into separate
     copies. The first file the walker encountered keeps the cluster.
 
-  * Long file names. LFN slots are validated only for internal
-    consistency, never decoded; a broken long name is not repaired.
-    The underlying 8.3 name stays usable -- fix the long name from a
-    host system if you need it.
+  * Long file names are never decoded or rebuilt. A corrupt long name
+    is dropped, not reconstructed -- recreate it from a host system if
+    you need it. The 8.3 name always stays usable.
 
 
 OUTPUT EXAMPLE
@@ -208,8 +219,7 @@ EXIT CODES
   1   -- issues found, not fixed (read-only run, i.e. without /F).
   2   -- issues found, all fixed (/F run).
   3   -- issues found, some left unfixed (/F run) -- see the WARN
-         lines for why (name collision, LFN spanning a sector, a write
-         that failed).
+         lines for why (name collision or an I/O failure).
   255 -- fatal: the volume could not be checked at all (bad drive,
          unreadable boot sector or BPB, out of page memory, an I/O
          error mid-scan).

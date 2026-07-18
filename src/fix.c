@@ -242,51 +242,136 @@ int fix_dir_name_set(LBA_t sect, WORD off, const BYTE *new_name)
     return 1;
 }
 
-#define FIX_ATTR_LFN 0x0Fu
-
-int fix_delete_preceding_lfn(LBA_t sect, WORD off, LBA_t dir_start_sect)
+/* Patch all group slots that live in `sect`. */
+static void lfn_sum_in_sector(const fix_lfn_slot_t *slots, BYTE count,
+                              LBA_t sect, BYTE sum)
 {
-    WORD scan_off;
-    WORD del_count;
+    BYTE i;
+    for (i = 0u; i < count; i++) {
+        if (slots[i].sect == sect) g_sect_a[slots[i].off + 13u] = sum;
+    }
+}
+
+/* Restore the old checksum in every non-SFN sector written before a
+ * failed group+name update. Best effort: fix_write already records the
+ * original failure as incomplete, and another failure leaves that state
+ * set while preserving as much of the old group as the device allows. */
+static void lfn_rollback(const fix_lfn_slot_t *slots, BYTE written,
+                         LBA_t sfn_sect, BYTE old_sum)
+{
+    BYTE i = 0u;
+    while (i < written) {
+        BYTE j = i;
+        LBA_t sect = slots[i].sect;
+        while (j < written && slots[j].sect == sect) j++;
+        if (sect != sfn_sect
+            && disk_read(0u, g_sect_a, sect, 1u) == RES_OK) {
+            lfn_sum_in_sector(slots, written, sect, old_sum);
+            (void)fix_write(sect, g_sect_a, 1u);
+        }
+        i = j;
+    }
+    chain_invalidate();
+}
+
+int fix_lfn_delete(const fix_lfn_slot_t *slots, BYTE count)
+{
+    BYTE i;
 
     if (!g_fix_enabled) return 1;
-
-    /* The directory's very first slot has nothing before it at all --
-     * not ambiguous, just empty. Every other off==0 means "this is a
-     * later sector of the directory and we can't see the one before
-     * it", which IS ambiguous (handled below). */
-    if (off == 0u && sect == dir_start_sect) return 1;
-
-    /* Pass 1: read-only. Walk backward one slot at a time while the
-     * preceding slot is LFN, staying inside this sector. */
-    if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
-    scan_off  = off;
-    del_count = 0u;
-    while (scan_off >= 32u
-           && (g_sect_a[scan_off - 32u + 11u] & 0x3Fu) == FIX_ATTR_LFN) {
-        scan_off -= 32u;
-        del_count++;
-    }
-    if (scan_off == 0u) {
-        /* Either off itself was this sector's first slot (no
-         * visibility into whatever precedes this sector), or the walk
-         * consumed every slot down to offset 0 and slot 0 was itself
-         * LFN (the run may continue into the previous sector). Either
-         * way we cannot rule out more of the run sitting where we
-         * cannot see it -- abstain, no writes at all. */
-        return 0;
-    }
-    if (del_count == 0u) return 1;   /* no LFN precedes; nothing to do */
+    if (count == 0u || count > FIX_LFN_MAX_SLOTS) return 0;
 
     chain_invalidate();
-    scan_off = off;
-    while (del_count-- > 0u) {
-        scan_off -= 32u;
-        if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
-        g_sect_a[scan_off] = 0xE5u;
+    i = 0u;
+    while (i < count) {
+        BYTE j = i;
+        LBA_t sect = slots[i].sect;
+        if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) {
+            fix_count_incomplete();
+            return 0;
+        }
+        while (j < count && slots[j].sect == sect) {
+            g_sect_a[slots[j].off] = 0xE5u;
+            j++;
+        }
         if (!fix_write(sect, g_sect_a, 1u)) return 0;
-        fix_count_applied();
+        i = j;
     }
+    chain_invalidate();
+    fix_count_applied();
+    return 1;
+}
+
+int fix_lfn_name_set(const fix_lfn_slot_t *slots, BYTE count,
+                     BYTE old_sum, BYTE new_sum,
+                     LBA_t sfn_sect, WORD sfn_off, const BYTE *new_name)
+{
+    BYTE i, j;
+
+    if (!g_fix_enabled) return 1;
+    if (count == 0u || count > FIX_LFN_MAX_SLOTS) return 0;
+
+    /* Must precede the FIRST g_sect_a touch below, not just the first
+     * mutation: chain.c caches a FAT sector in that same buffer via
+     * g_cached_sect. A preflight read that succeeds and then bails on a
+     * later sector would otherwise return with directory bytes sitting
+     * in g_sect_a while chain.c still believes it holds its FAT sector,
+     * and the next chain_get_entry() would hand out garbage as a FAT
+     * entry -- see the CRITICAL note in fix_fat_set. */
+    chain_invalidate();
+
+    /* Preflight every sector before the first mutation. */
+    i = 0u;
+    while (i < count) {
+        LBA_t sect = slots[i].sect;
+        if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) {
+            fix_count_incomplete();
+            return 0;
+        }
+        do { i++; } while (i < count && slots[i].sect == sect);
+    }
+    if (disk_read(0u, g_sect_a, sfn_sect, 1u) != RES_OK) {
+        fix_count_incomplete();
+        return 0;
+    }
+
+    i = 0u;
+    while (i < count) {
+        LBA_t sect = slots[i].sect;
+        j = i;
+        do { j++; } while (j < count && slots[j].sect == sect);
+        if (sect != sfn_sect) {
+            if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) {
+                fix_count_incomplete();
+                lfn_rollback(slots, i, sfn_sect, old_sum);
+                return 0;
+            }
+            lfn_sum_in_sector(slots, count, sect, new_sum);
+            if (!fix_write(sect, g_sect_a, 1u)) {
+                /* Include the sector whose write reported failure: a
+                 * device may have committed it before returning error. */
+                lfn_rollback(slots, j, sfn_sect, old_sum);
+                return 0;
+            }
+        }
+        i = j;
+    }
+
+    /* Commit point: checksum tail and SFN share this final sector write. */
+    if (disk_read(0u, g_sect_a, sfn_sect, 1u) != RES_OK) {
+        fix_count_incomplete();
+        lfn_rollback(slots, count, sfn_sect, old_sum);
+        return 0;
+    }
+    lfn_sum_in_sector(slots, count, sfn_sect, new_sum);
+    for (i = 0u; i < 11u; i++) g_sect_a[sfn_off + i] = new_name[i];
+    if (!fix_write(sfn_sect, g_sect_a, 1u)) {
+        lfn_rollback(slots, count, sfn_sect, old_sum);
+        return 0;
+    }
+
+    chain_invalidate();
+    fix_count_applied();
     return 1;
 }
 

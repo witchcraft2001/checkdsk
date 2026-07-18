@@ -175,8 +175,98 @@ def add_entry(img, g, dirclus, ent):
     for off in dir_slots(img, g, dirclus):
         if img[off] in (0x00, 0xE5):
             img[off:off + 32] = ent
-            return
+            return off
     raise SystemExit("directory full")
+
+
+def lfn_checksum(name83):
+    """Standard FAT LFN checksum over the 11 raw SFN bytes."""
+    s = 0
+    for ch in name83.encode("latin-1"):
+        s = (((s & 1) << 7) + (s >> 1) + ch) & 0xFF
+    return s
+
+
+# UCS-2 char slots within a 32-byte LFN entry: 5 + 6 + 2 = 13 chars.
+_LFN_CHAR_OFF = (1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30)
+
+
+def lfn_slots(longname, name83, chk=None):
+    """Build a well-formed LFN group, returned in on-disk order (the
+    physically-first slot carries the highest order number plus 0x40)."""
+    if chk is None:
+        chk = lfn_checksum(name83)
+    if not longname or len(longname) > 255:
+        raise ValueError("LFN length must be 1..255")
+    units = [ord(c) for c in longname]
+    # An exact multiple of 13 occupies full slots with no terminator or
+    # padding. Only a partial final slot gets NUL + 0xFFFF padding.
+    if len(units) % 13:
+        units.append(0x0000)
+        while len(units) % 13:
+            units.append(0xFFFF)
+    n = len(units) // 13
+    out = []
+    for i in range(n):
+        part = units[i * 13:(i + 1) * 13]
+        e = bytearray(32)
+        e[0] = (i + 1) | (0x40 if i == n - 1 else 0)
+        e[11] = 0x0F
+        e[13] = chk
+        for k, p in enumerate(_LFN_CHAR_OFF):
+            e[p] = part[k] & 0xFF
+            e[p + 1] = (part[k] >> 8) & 0xFF
+        out.append(bytes(e))
+    out.reverse()
+    return out
+
+
+def add_lfn_file(img, g, dirclus, longname, name83, size, chk=None, bad_order=False):
+    """Add a file preceded by a real LFN group. Slots must be written
+    before the SFN and stay contiguous -- add_entry fills the first free
+    slot each time, and a real LFN slot's byte 0 is an order number
+    (never 0x00/0xE5), so it is correctly seen as occupied."""
+    n = max(1, ceil_div(size, g.clus_bytes()))
+    chain = alloc_chain(img, g, n)
+    write_chain_data(img, g, chain, content_for(name83, size))
+    slots = lfn_slots(longname, name83, chk)
+    if bad_order and len(slots) > 1:
+        s = bytearray(slots[1])
+        s[0] = 0x09                     # wrong sequence number
+        slots[1] = bytes(s)
+    slot_offs = [add_entry(img, g, dirclus, s) for s in slots]
+    sfn_off = add_entry(img, g, dirclus, dirent(name83, 0x20, chain[0], size))
+    return chain, slot_offs, sfn_off
+
+
+def extend_dir_chain(img, g, dirclus):
+    """Append one zero-filled cluster to a chain directory (needed to
+    put a FAT32-root test group across a sector/cluster boundary)."""
+    c = dirclus if dirclus else g.rootclus
+    while True:
+        v = get_fat(img, g, c)
+        if not (2 <= v < g.nfatent):
+            break
+        c = v
+    new = alloc_chain(img, g, 1)[0]
+    set_fat(img, g, c, new)
+    return new
+
+
+def pad_dir_to_slot_mod(img, g, dirclus, target):
+    """Add harmless empty SFNs until the next free slot is target mod 16."""
+    seq = 0
+    while True:
+        for idx, off in enumerate(dir_slots(img, g, dirclus)):
+            if img[off] in (0x00, 0xE5):
+                break
+        else:
+            raise SystemExit("directory full while padding")
+        if idx % 16 == target:
+            return
+        name = ("PAD%05d" % seq) + "TMP"
+        add_entry(img, g, dirclus, dirent(name, 0x20, 0, 0))
+        seq += 1
 
 
 def add_file(img, g, dirclus, name83, size):
@@ -278,6 +368,18 @@ def build(path, fstype):
     add_file(img, g, 0, "FILE1   TXT", cb * 2 + cb // 2)
     add_file(img, g, 0, "FILE2   TXT", cb // 3)
     add_file(img, g, 0, "README  TXT", cb + 7)
+    # A well-formed LFN group in the base image: every scenario then
+    # doubles as a false-positive guard for the sequence/checksum
+    # cross-check -- a valid long name must never be reported.
+    add_lfn_file(img, g, 0, "Long Name File.txt", "LONGNA~1TXT", cb // 2)
+    # Exact 13-char LFN: one full slot, with no NUL/0xFFFF padding.
+    add_lfn_file(img, g, 0, "ABCDEFGHIJKLM", "EXACT13 TXT", cb // 4)
+    # A future LFN-attribute dirent type is not a type-0 name component.
+    # Maintenance utilities must preserve/ignore it, not delete it.
+    future = bytearray(lfn_slots("Future Slot", "FUTURE~1TMP")[0])
+    future[12] = 1
+    future[26], future[27] = 0x34, 0x12
+    add_entry(img, g, 0, bytes(future))
     sub1 = add_dir(img, g, 0, "SUB1       ")
     add_file(img, g, sub1, "NOTES   TXT", cb + cb // 2)
     sub2 = add_dir(img, g, sub1, "SUB2       ")
@@ -406,18 +508,79 @@ def corrupt(img, g, scenario):
         off, _ = find_file_chain(img, g, "FILE1   TXT")
         img[off + 4] = ord('*')   # "FILE1   TXT" -> "FILE*   TXT"
     elif scenario == "badname_lfn":
-        # A tiny 2-slot LFN run (dummy content -- dirent_validate only
-        # checks attr/reserved fields on LFN slots, not order/checksum,
-        # see scan.c's LFN-removal note) immediately followed by a
-        # bad-name SFN, all landing in the same directory sector.
-        # Exercises fix_delete_preceding_lfn's main (same-sector) path.
-        lfn1 = bytearray(32); lfn1[11] = 0x0F
-        lfn2 = bytearray(32); lfn2[11] = 0x0F
-        add_entry(img, g, 0, bytes(lfn1))
-        add_entry(img, g, 0, bytes(lfn2))
+        # A VALID 2-slot LFN group whose checksum matches its (lowercase,
+        # therefore flagged) SFN. Folding the SFN to upper case
+        # invalidates that checksum, so the name-fix must RESTAMP the
+        # group rather than delete it -- the long name has to survive.
+        #
+        # The previous fixture here used zero-filled dummy slots, which
+        # never actually reached the image: add_entry treats byte 0 ==
+        # 0x00 as a free slot, so each dummy was overwritten by the next
+        # entry and the SFN ended up with no LFN in front of it at all.
+        add_lfn_file(img, g, 0, "Lower Case Name.txt", "lower~1 txt",
+                     g.clus_bytes() // 2)
+    elif scenario == "lfn_badsum":
+        # Well-formed sequence, wrong checksum byte -> the group cannot
+        # belong to the SFN behind it. Detected, and dropped under /F.
+        add_lfn_file(img, g, 0, "Broken Checksum.txt", "BROKEN~1TXT",
+                     g.clus_bytes() // 2,
+                     chk=lfn_checksum("BROKEN~1TXT") ^ 0xFF)
+    elif scenario == "lfn_badord":
+        # Correct checksum, scrambled order byte on the second slot.
+        add_lfn_file(img, g, 0, "Broken Order Name.txt", "BRKORD~1TXT",
+                     g.clus_bytes() // 2, bad_order=True)
+    elif scenario == "lfn_badordbit":
+        _, slots, _ = add_lfn_file(img, g, 0, "Reserved Order Bit.txt",
+                                   "ORDBIT~1TXT", g.clus_bytes() // 2)
+        img[slots[0]] |= 0x80
+    elif scenario == "lfn_earlynul":
+        _, slots, _ = add_lfn_file(img, g, 0, "Early Null Damage.txt",
+                                   "EARLYN~1TXT", g.clus_bytes() // 2)
+        # Physical last slot is ordinal 1 (not LAST): it must contain 13
+        # real characters, never an early terminator.
+        img[slots[-1] + 1:slots[-1] + 3] = b"\x00\x00"
+    elif scenario == "lfn_badpad":
+        _, slots, _ = add_lfn_file(img, g, 0, "Padding Damage.txt",
+                                   "BADPAD~1TXT", g.clus_bytes() // 2)
+        # Highest/LAST slot contains a short tail, NUL, then 0xFFFF. Put
+        # a real 'A' into the last padding code unit.
+        img[slots[0] + 30:slots[0] + 32] = b"A\x00"
+    elif scenario == "lfn_orphan":
+        for slot in lfn_slots("Orphan Long Name.txt", "ORPHAN~1TXT"):
+            add_entry(img, g, 0, slot)
+    elif scenario == "lfn_overlong":
+        # 21 full slots encode 273 characters, beyond FAT's 255-char /
+        # 20-slot maximum. Ensure FAT32 root has enough chain capacity.
+        if g.type == 32:
+            extend_dir_chain(img, g, 0)
+            extend_dir_chain(img, g, 0)
+        name83 = "TOOLONG TXT"
+        chk = lfn_checksum(name83)
+        for ordno in range(21, 0, -1):
+            e = bytearray(32)
+            e[0] = ordno | (0x40 if ordno == 21 else 0)
+            e[11] = 0x0F
+            e[13] = chk
+            for p in _LFN_CHAR_OFF:
+                e[p], e[p + 1] = ord("A"), 0
+            add_entry(img, g, 0, bytes(e))
         chain = alloc_chain(img, g, 1)
-        write_chain_data(img, g, chain, content_for("BADLFN", g.clus_bytes()))
-        add_entry(img, g, 0, dirent("BAD*FILETXT", 0x20, chain[0], g.clus_bytes()))
+        add_entry(img, g, 0,
+                  dirent(name83, 0x20, chain[0], g.clus_bytes() // 2))
+    elif scenario in ("badname_lfn_cross", "lfn_badsum_cross"):
+        # Place two LFN slots at sector offsets 14/15 and the SFN at
+        # offset 0 of the next sector. FAT32's one-sector root cluster
+        # needs an explicit chain extension first.
+        if g.type == 32:
+            extend_dir_chain(img, g, 0)
+        pad_dir_to_slot_mod(img, g, 0, 14)
+        if scenario == "badname_lfn_cross":
+            add_lfn_file(img, g, 0, "Cross Sector Lower.txt", "cross~1 txt",
+                         g.clus_bytes() // 2)
+        else:
+            name83 = "CRSUM~1 TXT"
+            add_lfn_file(img, g, 0, "Cross Sector Checksum.txt", name83,
+                         g.clus_bytes() // 2, chk=lfn_checksum(name83) ^ 0xFF)
     elif scenario == "badname_cyr":
         # README's extension byte 0 becomes CP866 lowercase Cyrillic
         # 'a' (0xA0, DOS_Proc.asm UPPER range 0xA0-0xAF) -- must fold
@@ -449,6 +612,37 @@ def has_live_entry(img, g, dirclus, name83):
         if bytes(e[0:11]) == name83.encode():
             return True
     return False
+
+
+def lfn_group_before(img, g, dirclus, name83):
+    run = []
+    for off in dir_slots(img, g, dirclus):
+        e = img[off:off + 32]
+        if e[0] == 0x00:
+            break
+        if e[0] == 0xE5:
+            run = []
+            continue
+        if (e[11] & 0x3F) == 0x0F and e[12] == 0:
+            run.append(off)
+            continue
+        if bytes(e[0:11]) == name83.encode("latin-1"):
+            return run
+        run = []
+    return []
+
+
+def valid_lfn_before(img, g, dirclus, name83):
+    run = lfn_group_before(img, g, dirclus, name83)
+    want = lfn_checksum(name83)
+    if not run:
+        return False
+    for off in run:
+        if img[off] == 0xE5 or (img[off + 11] & 0x3F) != 0x0F:
+            return False
+        if img[off + 13] != want:
+            return False
+    return True
 
 
 # -------------------------------------------------------------- verify
@@ -554,6 +748,21 @@ def verify(path, allow_orphans=False):
         except SystemExit:
             bad.append("V6: %s missing" % name.strip())
 
+    # V7: base-image LFN guards. EXACT13 exercises the no-NUL exact
+    # multiple representation; the future type must survive every /F run.
+    if not valid_lfn_before(img, g, 0, "EXACT13 TXT"):
+        bad.append("V7: exact-13 LFN missing or invalid")
+    future_ok = False
+    for off in dir_slots(img, g, 0):
+        e = img[off:off + 32]
+        if e[0] == 0x00:
+            break
+        if (e[11] & 0x3F) == 0x0F and e[12] == 1:
+            future_ok = e[26] == 0x34 and e[27] == 0x12
+            break
+    if not future_ok:
+        bad.append("V7: future LFN dirent type was modified/deleted")
+
     if bad:
         print("VERIFY FAIL (%d):" % len(bad))
         for m in bad[:30]:
@@ -572,6 +781,12 @@ def main():
         print(__doc__)
         return 2
     cmd, path = sys.argv[1], sys.argv[2]
+    if cmd == "lfnsum":
+        # args: lfnsum <name83> -- print the LFN checksum as hex, so a
+        # shell test can assert a restamped group carries the checksum
+        # of the SFN it now sits in front of. `path` is the name here.
+        print("%#04x" % lfn_checksum(path))
+        return 0
     if cmd == "build":
         build(path, sys.argv[3])
         return 0
@@ -587,6 +802,11 @@ def main():
         img, g = load(path)
         ok = has_live_entry(img, g, 0, sys.argv[3])
         print("PRESENT" if ok else "ABSENT")
+        return 0 if ok else 1
+    if cmd == "haslfn":
+        img, g = load(path)
+        ok = valid_lfn_before(img, g, 0, sys.argv[3])
+        print("VALID" if ok else "MISSING/BAD")
         return 0 if ok else 1
     if cmd == "locate":
         # Print the absolute byte offset of name83's dirent. Must be

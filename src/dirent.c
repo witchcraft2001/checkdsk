@@ -74,6 +74,41 @@ static BYTE dss_upper(BYTE c)
     return c;
 }
 
+/* Standard FAT LFN checksum of the 11 raw SFN bytes: an 8-bit
+ * rotate-right accumulator plus each name byte in turn. Every LFN slot
+ * of a group carries this value at offset 13, so scan.c can cross-check
+ * a group against the SFN it precedes, and the name-sanitize repair can
+ * recompute it after rewriting the SFN. */
+BYTE dirent_sfn_checksum(const BYTE *e)
+{
+    BYTE sum = 0u;
+    UINT i;
+    for (i = 0u; i < 11u; i++)
+        sum = (BYTE)(((sum >> 1) | (sum << 7)) + e[i]);
+    return sum;
+}
+
+/* Chars forbidden in an LFN name (a smaller set than SFN -- LFN allows
+ * '+ , ; = [ ] .' and spaces). Control chars (< 0x20) are handled
+ * separately by the caller since 0x0000 doubles as the name terminator. */
+static int is_forbidden_lfn_char(WORD c)
+{
+    switch (c) {
+    case 0x22: case 0x2A: case 0x2F: case 0x3A:   /* " * / : */
+    case 0x3C: case 0x3E: case 0x3F: case 0x5C:   /* < > ? \ */
+    case 0x7C:                                    /* | */
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int dirent_is_current_lfn(const BYTE *e)
+{
+    return ((e[11] & 0x3Fu) == ATTR_LFN && e[0] != 0xE5u
+            && e[12] == 0u) ? 1 : 0;
+}
+
 #define ld_dword_le(p) vol_ld_d(p)
 #define ld_word_le(p)  vol_ld_w(p)
 
@@ -90,10 +125,62 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
 
     attr = e[11];
 
-    /* LFN slot: limited checks here, full sequence/checksum in 3.6. */
+    /* LFN slot: current type-0 structural and character checks. The
+     * cross-slot sequence and SFN-checksum match need running group
+     * state and are done in scan.c. */
     if ((attr & 0x3Fu) == ATTR_LFN) {
-        if (e[12] != 0u)                  flags |= DE_LFN_BAD;
+        BYTE ord_raw;
+        BYTE ord;
+        BYTE is_last;
+        BYTE saw_nul;
+        BYTE chars;
+
+        /* Non-zero LDIR_Type denotes a reserved/future dirent type, not
+         * a malformed current long-name component. FAT maintenance
+         * utilities must preserve it without interpreting its remaining
+         * fields using the type-0 layout. */
+        if (e[12] != 0u) return 0u;
+
+        /* UCS-2 name chars sit at offsets 1-10, 14-25, 28-31 (13 chars,
+         * 2 bytes LE each). A non-final slot must contain 13 real chars.
+         * The LAST slot contains either 13 real chars (an exact multiple)
+         * or >=1 real char, 0x0000, then only 0xFFFF padding. */
+        static const BYTE name_off[13] =
+            { 1u, 3u, 5u, 7u, 9u, 14u, 16u, 18u, 20u, 22u, 24u, 28u, 30u };
+
+        ord_raw = e[0];
+        ord     = (BYTE)(ord_raw & 0x3Fu);
+        is_last = (BYTE)(ord_raw & 0x40u);
+        if ((ord_raw & 0x80u) != 0u || ord == 0u || ord > 20u)
+            flags |= DE_LFN_BAD;
         if (e[26] != 0u || e[27] != 0u)   flags |= DE_LFN_BAD;
+
+        saw_nul = 0u;
+        chars   = 0u;
+        for (i = 0u; i < 13u; i++) {
+            WORD c = (WORD)((WORD)e[name_off[i]] | ((WORD)e[name_off[i] + 1u] << 8));
+            if (saw_nul) {
+                if (c != 0xFFFFu) flags |= DE_LFN_BAD;
+                continue;
+            }
+            if (c == 0x0000u) {
+                /* Empty tail or a terminator in a non-LAST slot would
+                 * encode a shorter name than the ordinal sequence says. */
+                if (!is_last || chars == 0u) flags |= DE_LFN_BAD;
+                saw_nul = 1u;
+                continue;
+            }
+            if (c == 0xFFFFu) {
+                flags |= DE_LFN_BAD;                 /* padding before NUL */
+                continue;
+            }
+            if (c < 0x0020u || is_forbidden_lfn_char(c)) {
+                flags |= DE_LFN_CHAR;
+            }
+            chars++;
+        }
+        /* 20 slots can hold at most 255 chars: 19*13 + 8. */
+        if (is_last && ord == 20u && chars > 8u) flags |= DE_LFN_BAD;
         return flags;
     }
 
@@ -184,7 +271,8 @@ void dirent_flags_print(UINT flags)
         { DE_LFN_BAD,          " lfn-bad" },
         { DE_CLUST_OOR,        " clust-oor" },
         { DE_FAT16_HI_CLUST,   " fat16-hi" },
-        { DE_NTRES_RSV,        " ntres" }
+        { DE_NTRES_RSV,        " ntres" },
+        { DE_LFN_CHAR,         " lfn-char" }
     };
     UINT i;
     if (flags == 0u) return;

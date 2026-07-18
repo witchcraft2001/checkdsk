@@ -90,8 +90,8 @@ int  fix_any_applied(void);
  * genuinely failed (fix_write calls this itself on disk_write failure,
  * so every repair site that funnels through it is covered for free)
  * or a repair site deliberately abstained (e.g. the name-sanitize
- * pack's LFN-boundary / name-collision guards in scan.c, which call
- * this directly since they never reach fix_write at all). NOT
+ * pack's name-collision guard in scan.c, which calls this directly
+ * since it never reaches fix_write at all). NOT
  * exhaustive: a disk_read failure inside a repair site before it ever
  * reaches fix_write is not separately tracked (rare -- transient read
  * fault mid-repair -- and the issue is still correctly counted as
@@ -133,26 +133,40 @@ int  fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value);
  * fix_dir_patch. */
 int  fix_dir_name_set(LBA_t sect, WORD off, const BYTE *new_name);
 
-/* An LFN group's checksum byte is computed over the 11 raw SFN bytes
- * of the entry it names, so rewriting those bytes (fix_dir_name_set)
- * orphans any preceding LFN run -- a real LFN-aware driver would then
- * see it as corrupt. Call this FIRST: it looks at the slot(s)
- * immediately before (sect, off) within the SAME sector and, if they
- * are a contiguous LFN run, deletes the whole run (0xE5) so no stale
- * checksum is left behind. `dir_start_sect` is the first sector of the
- * directory (sect, off) lives in (fs->dirbase for a FAT12/16 root,
- * chain_cluster_to_lba of the directory's start cluster otherwise) --
- * needed to tell "off==0 because nothing precedes at all" (the
- * directory's very first slot) apart from "off==0 because this is a
- * later sector we can't see past" (genuinely ambiguous). Returns 1 if
- * (sect, off) is now safe to rename (no run, or the whole run was
- * deleted), 0 if the run appears to continue into an earlier sector
- * we cannot inspect -- in that case NOTHING is written (no partial run
- * is ever left deleted) and the caller should leave the entry unfixed
- * this pass. Post-MVP: recompute the checksum in place instead of
- * deleting, which preserves the long name and does not need this
- * boundary restriction. */
-int  fix_delete_preceding_lfn(LBA_t sect, WORD off, LBA_t dir_start_sect);
+/* Maximum FAT LFN length is 255 UCS-2 characters, i.e. ceil(255/13)
+ * directory slots. scan.c stores the exact on-disk location of every
+ * slot while walking, which makes repairs work across sector and
+ * fragmented-cluster boundaries without a backwards re-scan. */
+#define FIX_LFN_MAX_SLOTS 20u
+
+typedef struct {
+    LBA_t sect;
+    WORD  off;
+} fix_lfn_slot_t;
+
+/* Delete all live slots of one broken/orphan LFN group. Slots may span
+ * sectors or non-contiguous directory clusters. Each touched sector is
+ * changed by one read-modify-write, and the whole group counts as one
+ * logical applied fix. Returns 0 on I/O failure.
+ *
+ * Unlike fix_lfn_name_set there is deliberately NO rollback: a failure
+ * partway through a multi-sector group leaves some slots deleted and
+ * some not. That is safe here because the group was already corrupt --
+ * the surviving remainder is still detected as broken on the next pass
+ * and finished off, so repeated runs converge. Rolling back would only
+ * restore a group that has to be deleted anyway. */
+int fix_lfn_delete(const fix_lfn_slot_t *slots, BYTE count);
+
+/* Atomically within the SFN sector, rewrite the SFN name and every LFN
+ * checksum slot that shares that sector. For a group spanning earlier
+ * sectors, those sectors are updated first and rolled back to old_sum
+ * if a later write fails; the SFN-containing sector is always written
+ * last. This keeps an ordinary I/O failure from turning a valid group
+ * into a mismatched one. One successful group+SFN update counts as one
+ * logical applied fix. */
+int fix_lfn_name_set(const fix_lfn_slot_t *slots, BYTE count,
+                     BYTE old_sum, BYTE new_sum,
+                     LBA_t sfn_sect, WORD sfn_off, const BYTE *new_name);
 
 /* Non-blocking abort poll -- ESC or Ctrl+C (raw ascii, modifier+letter,
  * or modifier+scan-code, to work under both the LAT and RUS keyboard

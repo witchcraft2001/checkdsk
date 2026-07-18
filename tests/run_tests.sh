@@ -28,7 +28,7 @@ trap 'rm -rf "$WORK"' EXIT
 fstypes=("$@")
 [ ${#fstypes[@]} -eq 0 ] && fstypes=(fat16 fat12 fat32)
 
-scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_cyr)
+scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_lfn_cross badname_cyr lfn_badsum lfn_badsum_cross lfn_badord lfn_badordbit lfn_earlynul lfn_badpad lfn_orphan lfn_overlong)
 modes=("F" "FC")
 
 pass=0
@@ -111,6 +111,66 @@ for fs in "${fstypes[@]}"; do
     unset CHKDSK_WIN3_SHARE
     python3 "$MKIMG" verify "$img" >>"$log" 2>&1 || {
         echo "[$fs/clean] generator image fails own verify"; fail=$((fail+1)); failures+=("$fs/clean-verify"); }
+done
+
+# Cross-sector SFN commit failure: write #1 restamps the earlier LFN
+# sector, write #2 (SFN sector) is injected to fail, and the repair must
+# roll write #1 back. The old lowercase SFN and its valid old-checksum
+# LFN must remain paired; only the original lowercase issue may remain.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-lfn-rollback.img"
+    tag="[$fs/lfn_rollback]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badname_lfn_cross >>"$log" 2>&1
+    CHKDSK_FAIL_WRITE_N=2 "$HOST" "$img" /F /Y >>"$log" 2>&1
+    rc=$?
+    rout="$WORK/$fs-lfn-rollback-ro.out"
+    "$HOST" "$img" >"$rout" 2>>"$log"
+    ro_rc=$?
+    if [ $rc -ne 3 ]; then
+        echo "$tag FAIL: injected write failure exit=$rc, want 3"
+        fail=$((fail+1)); failures+=("$fs/lfn_rollback/exit")
+    elif [ $ro_rc -ne 1 ]; then
+        echo "$tag FAIL: rolled-back image exit=$ro_rc, want original lowercase issue"
+        fail=$((fail+1)); failures+=("$fs/lfn_rollback/ro")
+    elif grep -q 'lfn-broken' "$rout"; then
+        echo "$tag FAIL: failed commit left the LFN checksum mismatched"
+        fail=$((fail+1)); failures+=("$fs/lfn_rollback/checksum")
+    elif ! python3 "$MKIMG" haslfn "$img" "cross~1 txt" >>"$log" 2>&1; then
+        echo "$tag FAIL: old LFN/SFN pair was not restored"
+        fail=$((fail+1)); failures+=("$fs/lfn_rollback/pair")
+    else
+        echo "$tag ok (failed commit rolled back to valid old pair)"
+        pass=$((pass+1))
+    fi
+done
+
+# Cross-sector restamp: the long name must survive while both slots get
+# the checksum of the folded SFN. A clean follow-up scan alone is not
+# sufficient here because deleting the LFN would also look clean.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-lfnstamp-cross.img"
+    tag="[$fs/lfn_restamp_cross]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badname_lfn_cross >>"$log" 2>&1
+    out="$WORK/$fs-lfnstamp-cross.out"
+    "$HOST" "$img" /F /Y >"$out" 2>>"$log"
+    if ! python3 "$MKIMG" haslfn "$img" "CROSS~1 TXT" >>"$log" 2>&1; then
+        echo "$tag FAIL: cross-sector LFN was not preserved/restamped"
+        fail=$((fail+1)); failures+=("$fs/lfn_restamp_cross/preserve")
+    else
+        # FAT32 adds one separate applied fix when the successful directory
+        # write invalidates FSInfo for DSS to recalculate on remount.
+        want_applied=1
+        [ "$fs" = fat32 ] && want_applied=2
+        if ! grep -q "Fixes: found=1 applied=$want_applied" "$out"; then
+            echo "$tag FAIL: logical fix counters are not 1/$want_applied"
+            fail=$((fail+1)); failures+=("$fs/lfn_restamp_cross/count")
+        else
+            echo "$tag ok (cross-sector group preserved, one logical fix)"
+            pass=$((pass+1))
+        fi
+    fi
 done
 
 # name-collision guard: badname_collide adds a lowercase twin of FILE2
@@ -197,6 +257,38 @@ for fs in "${fstypes[@]}"; do
         fail=$((fail+1)); failures+=("$fs/warngate/exitcode")
     else
         echo "$tag ok (declined, no writes, exit=1)"
+        pass=$((pass+1))
+    fi
+done
+
+# LFN checksum restamp (specs.md's post-MVP item): badname_lfn puts a
+# VALID 2-slot LFN group in front of a lowercase SFN. Folding the SFN to
+# upper case invalidates the group's checksum, so the name-fix must
+# restamp it in place -- the long name must SURVIVE, not be deleted.
+# Asserts the slot right before the SFN is still a live LFN slot
+# (order byte 0x01, attr 0x0F) carrying the NEW name's checksum.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-lfnstamp.img"
+    tag="[$fs/lfn_restamp]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badname_lfn >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >>"$log" 2>&1
+    off=$(python3 "$MKIMG" locate "$img" "LOWER~1 TXT" 2>>"$log")
+    want=$(python3 "$MKIMG" lfnsum "LOWER~1 TXT" 2>>"$log")
+    if [ -z "$off" ]; then
+        echo "$tag FAIL: SFN not folded to LOWER~1 TXT"
+        fail=$((fail+1)); failures+=("$fs/lfn_restamp/fold")
+    elif ! python3 "$MKIMG" checkbyte "$img" "$((off - 32))" 0x01 >>"$log" 2>&1; then
+        echo "$tag FAIL: preceding LFN slot deleted or reordered (want order 0x01)"
+        fail=$((fail+1)); failures+=("$fs/lfn_restamp/alive")
+    elif ! python3 "$MKIMG" checkbyte "$img" "$((off - 32 + 11))" 0x0F >>"$log" 2>&1; then
+        echo "$tag FAIL: preceding slot is no longer an LFN slot"
+        fail=$((fail+1)); failures+=("$fs/lfn_restamp/attr")
+    elif ! python3 "$MKIMG" checkbyte "$img" "$((off - 32 + 13))" "$want" >>"$log" 2>&1; then
+        echo "$tag FAIL: LFN checksum not restamped to $want"
+        fail=$((fail+1)); failures+=("$fs/lfn_restamp/sum")
+    else
+        echo "$tag ok (long name preserved, checksum restamped to $want)"
         pass=$((pass+1))
     fi
 done

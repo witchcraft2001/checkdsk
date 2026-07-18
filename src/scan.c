@@ -22,11 +22,13 @@
  * parent's start_cluster (".." -- 0 if the parent is the root). They
  * are not counted toward the per-walk entry totals.
  *
- * LFN slots are passed over as opaque entries -- no sequence/checksum
- * cross-check against the following SFN (removed for memory budget,
- * see the comment above scan_frame_t). Name repairs that touch an
- * SFN's raw bytes (see fix_delete_preceding_lfn) still have to respect
- * any LFN run in front of it, even without decoding it.
+ * LFN groups are validated but never decoded: the sequence order and
+ * the SFN-checksum cross-check run off a single global accumulator
+ * (g_lfn / lfn_accumulate / lfn_terminate), so a group whose checksum
+ * or ordering disagrees with the SFN it precedes is reported and, under
+ * /F, deleted -- the long name is lost, the SFN stays usable. The name
+ * bytes themselves are never converted to a displayable string, which
+ * is why paths always print the 8.3 name.
  *
  * Output policy: only flagged entries (and cycle / depth-cap warnings)
  * are echoed, prefixed by their full path. Clean entries are silent;
@@ -102,6 +104,7 @@ typedef struct {
     DWORD truncated;     /* file size > chain length */
     DWORD excess;        /* file size < chain length */
     DWORD depth_capped;
+    DWORD lfn_bad;       /* LFN groups with bad sequence/checksum/orphan */
     /* End-of-run classic space report (scan_print_report). Counted
      * per live entry from its walked chain length, so a file/dir with
      * a broken chain contributes only the clusters actually reachable
@@ -116,6 +119,30 @@ typedef struct {
 
 /* Uninit at boot is fine: walk_tree zeroes every field before use. */
 static scan_totals_t g_totals;
+
+/* Running LFN-group state for Phase 3. A single global -- NOT per-frame
+ * -- is correct and sufficient: an LFN group always sits immediately in
+ * front of its SFN within one directory and is never interrupted by a
+ * descent (step() finishes the current entry before any depth change),
+ * so at most one group is ever "open" at a time. This is exactly what
+ * lets the sequence + checksum cross-check fit again after the per-frame
+ * version was removed for stack/_DATA pressure. Reset in walk_tree and
+ * consumed by lfn_terminate on the next non-LFN entry. */
+static struct {
+    BYTE active;    /* 1 once >=1 live LFN slot seen since the last reset */
+    BYTE sum;       /* checksum byte the group claims (slot offset 13) */
+    BYTE next_ord;  /* order number expected on the next physical slot */
+    BYTE ok_start;  /* 1 if the first physical slot had the 0x40 LAST bit */
+    BYTE broken;    /* 1 once any per-slot inconsistency is seen */
+    BYTE count;     /* stored live slots, capped at FIX_LFN_MAX_SLOTS */
+    fix_lfn_slot_t slots[FIX_LFN_MAX_SLOTS];
+} g_lfn;
+
+/* lfn_terminate result, read by the name-sanitize pack in step(). */
+#define LFN_NONE             0u  /* no run preceded this entry */
+#define LFN_VALID            1u  /* run present, consistent with this SFN */
+#define LFN_BROKEN_HANDLED   2u  /* run was broken and got deleted (/F) */
+#define LFN_BROKEN_ABSTAINED 3u  /* run broken but not safely fixable */
 
 /* Chain-walk findings, flag bits returned by walk_chain. */
 #define CW_CYCLE      0x01u   /* first cluster already set in bitmap */
@@ -370,6 +397,95 @@ static void print_flagged(BYTE depth, const BYTE *e)
     }
 }
 
+/* Fold one live LFN slot into the running group state. Slots are stored
+ * in reverse: the physically-first slot carries the highest order number
+ * plus the 0x40 LAST bit, then order counts down to 1, immediately
+ * followed by the SFN. Per-slot structural defects and forbidden name
+ * chars come from dirent_validate and fold into the same `broken` flag
+ * -- the remedy is identical either way (drop the long name). */
+static void lfn_accumulate(vol_t *fs, const BYTE *e, scan_frame_t *frame)
+{
+    BYTE ord     = (BYTE)(e[0] & 0x3Fu);
+    int  is_last = (e[0] & 0x40u) != 0;
+    LBA_t sect;
+    WORD  off;
+
+    if (!g_lfn.active) {
+        g_lfn.active   = 1u;
+        g_lfn.sum      = e[13];
+        g_lfn.ok_start = is_last ? 1u : 0u;
+        g_lfn.broken   = (is_last && ord >= 1u) ? 0u : 1u;
+        g_lfn.count    = 0u;
+    } else {
+        if (is_last)                 g_lfn.broken = 1u;  /* only the first */
+        if (ord < 1u)                g_lfn.broken = 1u;
+        else if (ord != g_lfn.next_ord) g_lfn.broken = 1u;
+        if (e[13] != g_lfn.sum)      g_lfn.broken = 1u;
+    }
+    if (g_lfn.count < FIX_LFN_MAX_SLOTS) {
+        dirwalk_last_entry_location(&frame->walker, &sect, &off);
+        g_lfn.slots[g_lfn.count].sect = sect;
+        g_lfn.slots[g_lfn.count].off  = off;
+        g_lfn.count++;
+    } else {
+        g_lfn.broken = 1u;
+    }
+    g_lfn.next_ord = (ord >= 1u) ? (BYTE)(ord - 1u) : 0u;
+    if (dirent_validate(fs, e) != 0u) g_lfn.broken = 1u;
+}
+
+/* Close the LFN run (if any) that `ent` terminates, and return an
+ * LFN_* status the name-sanitize pack uses to decide whether a
+ * surviving run needs its checksum recomputed.
+ *
+ * `is_sfn` says whether `ent` is the run's rightful owner -- a live,
+ * non-dot, non-volume-label entry. Anything else (deleted slot, dot,
+ * volume label, end of directory, where ent may be NULL) leaves the run
+ * orphaned, which is corruption by definition.
+ *
+ * A broken run is reported and, under /F, deleted outright: the long
+ * name is garbage but the SFN stays perfectly usable. Exact locations
+ * captured by lfn_accumulate let the repair cover sector/cluster
+ * boundaries and also give an orphan group a safe deletion anchor. */
+static BYTE lfn_terminate(const BYTE *ent, int is_sfn,
+                          scan_frame_t *frame, BYTE depth, scan_totals_t *t)
+{
+    int   broken;
+    int   repaired;
+
+    if (!g_lfn.active) return LFN_NONE;
+    g_lfn.active = 0u;              /* consumed either way */
+
+    broken = g_lfn.broken || !g_lfn.ok_start || (g_lfn.next_ord != 0u);
+    if (is_sfn) {
+        if (dirent_sfn_checksum(ent) != g_lfn.sum) broken = 1;
+    } else {
+        broken = 1;                 /* run not closed by a real SFN */
+    }
+    if (!broken) return LFN_VALID;
+
+    fix_verbose_flush();
+    prt_str("  ");
+    print_path(depth);
+    if (is_sfn) print_sfn(ent); else prt_str("(orphan)");
+    prt_str(" * lfn-broken\r\n");
+    t->lfn_bad++;
+    fix_count_found();
+
+    if (!fix_enabled()) return LFN_BROKEN_ABSTAINED;
+
+    /* Exact slot coordinates were captured during the forward walk, so
+     * both SFN-anchored and orphan groups can be removed across sector
+     * and fragmented-cluster boundaries. */
+    repaired = fix_lfn_delete(g_lfn.slots, g_lfn.count);
+    dirwalk_buffer_dirty(&frame->walker);
+    if (repaired) {
+        return LFN_BROKEN_HANDLED;
+    }
+    warn_str("lfn-broken delete failed");
+    return LFN_BROKEN_ABSTAINED;
+}
+
 /* Process one entry of the dir at top-of-stack. Returns:
  *   1 -- continued, stay on same frame
  *   0 -- popped (frame finished)
@@ -395,11 +511,14 @@ static int step(vol_t *fs, BYTE *depth)
     DWORD         chain_last;
     int           is_file;
     int           has_dot;   /* -1=not peeked, 0=garbage, 1=real subdir */
+    BYTE          lfn_status = LFN_NONE;
 
     frame = &g_frames[*depth];
     rc = dirwalk_next(&frame->walker, &src);
     if (rc <  0) return -1;
     if (rc == 0) {
+        /* Directory ended. An open LFN run here never found its SFN. */
+        (void)lfn_terminate((const BYTE *)0, 0, frame, *depth, t);
         if (*depth > 0u) {
             (*depth)--;
             dirwalk_buffer_dirty(&g_frames[*depth].walker);
@@ -411,12 +530,39 @@ static int step(vol_t *fs, BYTE *depth)
 
     for (i = 0u; i < 32u; i++) ent[i] = src[i];
 
-    /* LFN sequence validation removed -- ATTR_LFN slots are counted
-     * but not parsed. See scan_frame_t comment. */
     if ((ent[11] & 0x3Fu) == ATTR_LFN) {
+        /* A deleted LFN slot (byte 0 == 0xE5, attr still 0x0F) is not
+         * part of any live run -- treat it as a terminator, not as a
+         * continuation, or its 0xE5 would be misread as an order byte. */
+        if (ent[0] == 0xE5u) {
+            (void)lfn_terminate((const BYTE *)0, 0, frame, *depth, t);
+        } else if (!dirent_is_current_lfn(ent)) {
+            /* Future/non-zero LDIR_Type: it is not a current name
+             * component and must be preserved without interpreting its
+             * reserved fields. It still interrupts any open type-0 run. */
+            (void)lfn_terminate((const BYTE *)0, 0, frame, *depth, t);
+        } else {
+            /* A valid group cannot exceed 20 slots. Close/delete a full
+             * malformed chunk before recording the next slot so even an
+             * arbitrarily long corrupt run is repairable in one pass
+             * without an unbounded location buffer. */
+            if (g_lfn.active && g_lfn.count == FIX_LFN_MAX_SLOTS) {
+                (void)lfn_terminate((const BYTE *)0, 0, frame, *depth, t);
+            }
+            lfn_accumulate(fs, ent, frame);
+        }
         t->entries++;
         return 1;
     }
+
+    /* Any non-LFN entry closes an open run. Only a live, non-dot,
+     * non-volume-label entry is the run's rightful owner; anything else
+     * leaves it orphaned. Runs before the current entry's own checks so
+     * the name-sanitize pack below can act on lfn_status. */
+    lfn_status = lfn_terminate(ent,
+                               (ent[0] != 0xE5u) && (is_dot_entry(ent) == 0)
+                                   && !(ent[11] & ATTR_VOLID),
+                               frame, *depth, t);
 
     /* Validate "." / ".." cluster pointers, then continue iteration
      * without counting them as regular entries.
@@ -597,32 +743,26 @@ static int step(vol_t *fs, BYTE *depth)
         }
 
         /* Name-sanitize pack: DE_NAME_BAD_CHAR / DE_NAME_LOWERCASE /
-         * DE_NAME_LEAD_SPACE all rewrite raw SFN bytes, which an LFN
-         * checksum may be computed over -- specs.md originally deferred
-         * this to a future /N flag over exactly that risk plus the
-         * same-directory name-collision risk below. We apply it under
-         * plain /F instead, gated on two checks that abstain (leave the
-         * entry flagged, untouched) rather than guess:
-         *   1. fix_delete_preceding_lfn -- drops any LFN run in front
-         *      of this entry so its stale checksum doesn't linger;
-         *      abstains if the run isn't fully visible in this sector.
-         *   2. name_collides -- the sanitized name must not already
+         * DE_NAME_LEAD_SPACE all rewrite raw SFN bytes, which a
+         * preceding LFN group's checksum is computed over. Two guards
+         * abstain (leaving the entry flagged, untouched) rather than
+         * guess:
+         *   1. name_collides -- the sanitized name must not already
          *      name a live sibling in this directory.
-         * Post-MVP: recompute the LFN checksum instead of dropping the
-         * run (preserves the long name; see fix_delete_preceding_lfn). */
+         *   2. the preceding LFN run, per lfn_status from
+         *      lfn_terminate: a VALID run gets its checksum restamped
+         *      for the new name so the long name SURVIVES the rename
+         *      (specs.md's post-MVP item, now implemented); a run that
+         *      was broken and could not be resolved blocks the rename
+         *      entirely. A broken-but-deleted run, or no run at all,
+         *      leaves nothing to preserve and the rename just proceeds. */
         if (fix_enabled() && (dflags & (DE_NAME_BAD_CHAR | DE_NAME_LOWERCASE
                                       | DE_NAME_LEAD_SPACE))
             && (ent[11] & 0x3Fu) != ATTR_LFN) {
             LBA_t sect; WORD off;
-            LBA_t dir_start;
             BYTE  new_name[11];
             dirwalk_last_entry_location(&frame->walker, &sect, &off);
             dirent_sanitize_name(ent, new_name);
-            dir_start = (*depth == 0u)
-                        ? ((fs->fs_type == FS_FAT32)
-                           ? chain_cluster_to_lba(fs, (DWORD)fs->dirbase)
-                           : fs->dirbase)
-                        : chain_cluster_to_lba(fs, frame->start_cluster);
             if (name_collides(fs, frame->start_cluster, (*depth == 0u),
                                sect, off, new_name)) {
                 fix_verbose_flush();
@@ -630,10 +770,17 @@ static int step(vol_t *fs, BYTE *depth)
                 print_sfn(new_name);
                 prt_str("' collides with an existing entry\r\n");
                 fix_count_incomplete();
-            } else if (!fix_delete_preceding_lfn(sect, off, dir_start)) {
-                warn_str("name-fix skipped, long-name entry spans a sector");
+            } else if (lfn_status == LFN_BROKEN_ABSTAINED) {
+                warn_str("name-fix skipped, unresolved long-name run");
                 fix_count_incomplete();
-            } else if (!fix_dir_name_set(sect, off, new_name)) {
+            } else if (lfn_status == LFN_VALID
+                       && !fix_lfn_name_set(
+                              g_lfn.slots, g_lfn.count, g_lfn.sum,
+                              dirent_sfn_checksum(new_name),
+                              sect, off, new_name)) {
+                warn_str("name-fix");
+            } else if (lfn_status != LFN_VALID
+                       && !fix_dir_name_set(sect, off, new_name)) {
                 warn_str("name-fix");
             }
             dirwalk_buffer_dirty(&frame->walker);
@@ -797,10 +944,12 @@ static int walk_tree(vol_t *fs)
     g_totals.truncated     = 0ul;
     g_totals.excess        = 0ul;
     g_totals.depth_capped  = 0ul;
+    g_totals.lfn_bad       = 0ul;
     g_totals.files         = 0ul;
     g_totals.file_clusters = 0ul;
     g_totals.dir_entries   = 0ul;
     g_totals.dir_clusters  = 0ul;
+    g_lfn.active           = 0u;
 
     depth = 0u;
     /* Root frame: start_cluster only used by dot validation, which is
@@ -1588,6 +1737,7 @@ int scan_run(vol_t *fs)
     emit_count(" broken=",      g_totals.broken_chains);
     emit_count(" truncated=",   g_totals.truncated);
     emit_count(" excess=",      g_totals.excess);
+    emit_count(" lfn-bad=",     g_totals.lfn_bad);
     emit_count(" depth-cap=",   g_totals.depth_capped);
     prt_nl();
 
@@ -1597,7 +1747,7 @@ int scan_run(vol_t *fs)
     if (lost_rc < 0) return -1;
     return (int)(g_totals.flagged + g_totals.cycles + g_totals.cross_links
                + g_totals.broken_chains + g_totals.truncated
-               + g_totals.excess) + lost_rc;
+               + g_totals.excess + g_totals.lfn_bad) + lost_rc;
 }
 
 /* Classic chkdsk-style space report (specs.md "Отчёт в конце работы").
