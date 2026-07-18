@@ -28,7 +28,7 @@ trap 'rm -rf "$WORK"' EXIT
 fstypes=("$@")
 [ ${#fstypes[@]} -eq 0 ] && fstypes=(fat16 fat12 fat32)
 
-scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess)
+scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn)
 modes=("F" "FC")
 
 pass=0
@@ -105,6 +105,41 @@ for fs in "${fstypes[@]}"; do
     unset CHKDSK_WIN3_SHARE
     python3 "$MKIMG" verify "$img" >>"$log" 2>&1 || {
         echo "[$fs/clean] generator image fails own verify"; fail=$((fail+1)); failures+=("$fs/clean-verify"); }
+done
+
+# name-collision guard: badname_collide adds a lowercase twin of FILE2
+# ("file2   TXT") whose sanitized (uppercased) name would collide with
+# the real FILE2 entry. Unlike every other scenario, the expected
+# post-/F state is NOT clean -- the rename must be skipped, so this
+# runs its own assertions instead of going through run_case/run_variant.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-badname_collide.img"
+    tag="[$fs/badname_collide]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badname_collide >>"$log" 2>&1
+
+    "$HOST" "$img" >>"$log" 2>&1
+    rc=$?
+    if [ $rc -ne 1 ]; then
+        echo "$tag DETECT FAIL (ro exit=$rc, want 1)"; fail=$((fail+1)); failures+=("$fs/badname_collide/detect"); continue
+    fi
+
+    "$HOST" "$img" /F >>"$log" 2>&1
+    "$HOST" "$img" >>"$log" 2>&1
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "$tag FAIL: collision was fixed anyway (should stay flagged)"
+        fail=$((fail+1)); failures+=("$fs/badname_collide/still-flagged")
+    elif ! python3 "$MKIMG" hasname "$img" "file2   TXT" >>"$log" 2>&1; then
+        echo "$tag FAIL: lowercase twin was renamed/deleted"
+        fail=$((fail+1)); failures+=("$fs/badname_collide/twin-intact")
+    elif ! python3 "$MKIMG" hasname "$img" "FILE2   TXT" >>"$log" 2>&1; then
+        echo "$tag FAIL: original FILE2 entry damaged"
+        fail=$((fail+1)); failures+=("$fs/badname_collide/original-intact")
+    else
+        echo "$tag ok (skipped, both names intact)"
+        pass=$((pass+1))
+    fi
 done
 
 # Each case runs under three I/O models, so a repair must be correct

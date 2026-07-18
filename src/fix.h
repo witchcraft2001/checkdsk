@@ -103,5 +103,33 @@ int  fix_fat_set(vol_t *fs, DWORD clust, DWORD value);
  * g_sect_a is clobbered on every call. */
 int  fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value);
 
+/* Rewrite the 11-byte SFN name field at (sect, off) with new_name[11].
+ * Touches only bytes 0..10 of the entry. Re-reads the sector into
+ * g_sect_a, writes back, bumps the "applied" counter. Returns 1 on
+ * success (or no-op in read-only mode), 0 on I/O failure. Caller must
+ * mark its dirwalk cursor buffer_dirty afterward, same as
+ * fix_dir_patch. */
+int  fix_dir_name_set(LBA_t sect, WORD off, const BYTE *new_name);
+
+/* An LFN group's checksum byte is computed over the 11 raw SFN bytes
+ * of the entry it names, so rewriting those bytes (fix_dir_name_set)
+ * orphans any preceding LFN run -- a real LFN-aware driver would then
+ * see it as corrupt. Call this FIRST: it looks at the slot(s)
+ * immediately before (sect, off) within the SAME sector and, if they
+ * are a contiguous LFN run, deletes the whole run (0xE5) so no stale
+ * checksum is left behind. `dir_start_sect` is the first sector of the
+ * directory (sect, off) lives in (fs->dirbase for a FAT12/16 root,
+ * chain_cluster_to_lba of the directory's start cluster otherwise) --
+ * needed to tell "off==0 because nothing precedes at all" (the
+ * directory's very first slot) apart from "off==0 because this is a
+ * later sector we can't see past" (genuinely ambiguous). Returns 1 if
+ * (sect, off) is now safe to rename (no run, or the whole run was
+ * deleted), 0 if the run appears to continue into an earlier sector
+ * we cannot inspect -- in that case NOTHING is written (no partial run
+ * is ever left deleted) and the caller should leave the entry unfixed
+ * this pass. Post-MVP: recompute the checksum in place instead of
+ * deleting, which preserves the long name and does not need this
+ * boundary restriction. */
+int  fix_delete_preceding_lfn(LBA_t sect, WORD off, LBA_t dir_start_sect);
 
 #endif /* CHKDSK_FIX_H */

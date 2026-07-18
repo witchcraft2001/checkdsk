@@ -400,9 +400,45 @@ def corrupt(img, g, scenario):
             set_fat(img, g, c, 1)
         _, chain = find_file_chain(img, g, "NOTES   TXT")
         set_fat(img, g, chain[0], 0, copies=(1,))
+    elif scenario == "badname":
+        # FILE1's SFN gets one forbidden byte -> DE_NAME_BAD_CHAR. No
+        # preceding LFN, no collision -- must sanitize cleanly under /F.
+        off, _ = find_file_chain(img, g, "FILE1   TXT")
+        img[off + 4] = ord('*')   # "FILE1   TXT" -> "FILE*   TXT"
+    elif scenario == "badname_lfn":
+        # A tiny 2-slot LFN run (dummy content -- dirent_validate only
+        # checks attr/reserved fields on LFN slots, not order/checksum,
+        # see scan.c's LFN-removal note) immediately followed by a
+        # bad-name SFN, all landing in the same directory sector.
+        # Exercises fix_delete_preceding_lfn's main (same-sector) path.
+        lfn1 = bytearray(32); lfn1[11] = 0x0F
+        lfn2 = bytearray(32); lfn2[11] = 0x0F
+        add_entry(img, g, 0, bytes(lfn1))
+        add_entry(img, g, 0, bytes(lfn2))
+        chain = alloc_chain(img, g, 1)
+        write_chain_data(img, g, chain, content_for("BADLFN", g.clus_bytes()))
+        add_entry(img, g, 0, dirent("BAD*FILETXT", 0x20, chain[0], g.clus_bytes()))
+    elif scenario == "badname_collide":
+        # A lowercase twin of the existing FILE2 entry: sanitizing it
+        # (uppercase) would exactly collide with FILE2's own name. The
+        # name-collision guard must skip the rename -- report only,
+        # both entries left exactly as they are.
+        add_file(img, g, 0, "file2   TXT", g.clus_bytes() // 4)
     else:
         raise SystemExit("unknown scenario %r" % scenario)
     print("corrupted: %s" % scenario)
+
+
+def has_live_entry(img, g, dirclus, name83):
+    for off in dir_slots(img, g, dirclus):
+        e = img[off:off + 32]
+        if e[0] == 0x00:
+            break
+        if e[0] == 0xE5 or e[11] == 0x0F:
+            continue
+        if bytes(e[0:11]) == name83.encode():
+            return True
+    return False
 
 
 # -------------------------------------------------------------- verify
@@ -537,6 +573,11 @@ def main():
         return 0
     if cmd == "verify":
         return verify(path, allow_orphans="--allow-orphans" in sys.argv)
+    if cmd == "hasname":
+        img, g = load(path)
+        ok = has_live_entry(img, g, 0, sys.argv[3])
+        print("PRESENT" if ok else "ABSENT")
+        return 0 if ok else 1
     print("unknown command %r" % cmd)
     return 2
 

@@ -16,8 +16,13 @@
  *     consistency (volume label, directory), first-cluster bounds,
  *     and -- on FAT12/16 -- the high cluster word at offset 20-21.
  *
- * Lowercase and stray space in SFN are reported as "warnings" but
- * still raise a flag bit; the caller decides whether to count them.
+ * Lowercase and stray space in SFN raise a flag bit like any other
+ * check; the caller (scan.c) decides whether to fold them into its
+ * own report/repair mask. They are deliberately left out of
+ * DE_ANY_ERROR below because that mask also gates directory descent
+ * (is_descendable_dir in scan.c) -- a lowercase or leading-space name
+ * is cosmetic, not evidence of a corrupt cluster pointer, and must
+ * not stop the walker from entering an otherwise-fine subdirectory.
  */
 
 #ifndef CHKDSK_DIRENT_H
@@ -50,5 +55,13 @@ UINT dirent_validate(vol_t *fs, const BYTE *e);
 /* Print a space-separated list of flag tags ("bad-name", "clust-oor", ...).
  * Emits nothing if flags == 0. Does NOT print a leading or trailing space. */
 void dirent_flags_print(UINT flags);
+
+/* Build a spec-compliant 11-byte SFN name into out[11] from e's raw
+ * name field: replaces a literal leading space, any forbidden
+ * punctuation/control byte, and any literal lowercase a-z with '_' or
+ * its uppercase equivalent. Padding spaces and the KANJI 0xE5-escape
+ * byte are left untouched. Safe to call whenever dirent_validate
+ * flagged DE_NAME_BAD_CHAR, DE_NAME_LOWERCASE or DE_NAME_LEAD_SPACE. */
+void dirent_sanitize_name(const BYTE *e, BYTE *out);
 
 #endif /* CHKDSK_DIRENT_H */

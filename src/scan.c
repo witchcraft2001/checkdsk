@@ -8,8 +8,8 @@
  * Phase 3 is an iterative depth-first walk over the directory tree
  * starting at the root. An explicit stack of dirwalk frames caps the
  * recursion depth at SCAN_MAX_DEPTH and keeps the C call stack flat
- * -- the per-frame state (dirwalk position, LFN-group accumulator,
- * etc.) lives in BSS.
+ * -- the per-frame state (dirwalk position, parent SFN, etc.) lives
+ * in BSS.
  *
  * Cycle / cross-link detection uses bitmap_test_and_set on the first
  * cluster of every sub-directory the walker enters. A bit already set
@@ -22,10 +22,11 @@
  * parent's start_cluster (".." -- 0 if the parent is the root). They
  * are not counted toward the per-walk entry totals.
  *
- * LFN slots run a small per-walker state machine that verifies the
- * descending order byte, that all slots agree on the checksum byte,
- * and that the SFN that follows produces the same checksum. A 0xE5
- * slot (deleted SFN) or any sequence break cancels the running group.
+ * LFN slots are passed over as opaque entries -- no sequence/checksum
+ * cross-check against the following SFN (removed for memory budget,
+ * see the comment above scan_frame_t). Name repairs that touch an
+ * SFN's raw bytes (see fix_delete_preceding_lfn) still have to respect
+ * any LFN run in front of it, even without decoding it.
  *
  * Output policy: only flagged entries (and cycle / depth-cap warnings)
  * are echoed, prefixed by their full path. Clean entries are silent;
@@ -248,6 +249,45 @@ static int dir_has_dot_entry(vol_t *fs, DWORD clust)
     return (g_sect_a[0] == '.') ? 1 : 0;
 }
 
+/* Renaming a corrupt SFN (see the name-sanitize pack in step()) risks
+ * producing two identical live names in the same directory -- specs.md
+ * flagged this exact risk and deferred auto-fixing name characters to
+ * a future /N flag for it. Instead of adding a flag, check for the
+ * collision up front: open a fresh walk of the directory that owns
+ * (skip_sect, skip_off) -- the entry about to be renamed -- and look
+ * for any other live, non-LFN entry already named `candidate`.
+ * `is_root` selects dirwalk_open_root (FAT12/16 fixed root or FAT32
+ * root, either way frame 0) vs dirwalk_open_chain(dir_cluster).
+ * Returns 1 on collision (including if the re-scan itself hits an I/O
+ * error -- abstain rather than risk a silent duplicate name), 0 if
+ * `candidate` is free.
+ *
+ * Side effect: clobbers g_sect_a like any dirwalk. Caller must mark
+ * its own walker buffer_dirty afterward. */
+static int name_collides(vol_t *fs, DWORD dir_cluster, int is_root,
+                          LBA_t skip_sect, WORD skip_off,
+                          const BYTE *candidate)
+{
+    dirwalk_t tw;
+    BYTE     *e;
+    int       rc;
+
+    if (is_root) dirwalk_open_root(&tw, fs);
+    else         dirwalk_open_chain(&tw, fs, dir_cluster);
+
+    for (;;) {
+        LBA_t sect; WORD off;
+        rc = dirwalk_next(&tw, &e);
+        if (rc <= 0) break;
+        dirwalk_last_entry_location(&tw, &sect, &off);
+        if (sect == skip_sect && off == skip_off) continue;
+        if (e[0] == 0xE5u) continue;
+        if ((e[11] & 0x3Fu) == ATTR_LFN) continue;
+        if (memcmp(e, candidate, 11) == 0) return 1;
+    }
+    return (rc < 0) ? 1 : 0;
+}
+
 /* Walk the FAT chain at `start`, marking visited clusters in the bitmap.
  * Stops at EOC, BAD, invalid link, I/O error, or test_and_set hit.
  * Returns CW_* flag bits; chain length is written to *len_out (0 means
@@ -459,7 +499,14 @@ static int step(vol_t *fs, BYTE *depth)
     }
 
     {
-        UINT de_err = dflags & DE_ANY_ERROR;
+        /* Wider than DE_ANY_ERROR on purpose: DE_NAME_LOWERCASE and
+         * DE_NAME_LEAD_SPACE are cosmetic (see dirent.h) and must stay
+         * out of the directory-descend gate, but they ARE now repaired
+         * below, so they must show up as found/flagged like any other
+         * repaired issue -- otherwise a dry run would report "clean"
+         * on an entry /F is about to touch. */
+        UINT de_err = dflags & (DE_ANY_ERROR | DE_NAME_LOWERCASE
+                                             | DE_NAME_LEAD_SPACE);
         if (de_err || cflags) {
             print_flagged(*depth, ent);
             prt_str(" *");
@@ -515,6 +562,47 @@ static int step(vol_t *fs, BYTE *depth)
             if (ok && (dflags & DE_FAT16_HI_CLUST))
                 ok = fix_dir_patch(sect, off, FIX_DPATCH_HI_CLUST_ZERO, 0ul);
             if (!ok) warn_str("dpatch");
+            dirwalk_buffer_dirty(&frame->walker);
+        }
+
+        /* Name-sanitize pack: DE_NAME_BAD_CHAR / DE_NAME_LOWERCASE /
+         * DE_NAME_LEAD_SPACE all rewrite raw SFN bytes, which an LFN
+         * checksum may be computed over -- specs.md originally deferred
+         * this to a future /N flag over exactly that risk plus the
+         * same-directory name-collision risk below. We apply it under
+         * plain /F instead, gated on two checks that abstain (leave the
+         * entry flagged, untouched) rather than guess:
+         *   1. fix_delete_preceding_lfn -- drops any LFN run in front
+         *      of this entry so its stale checksum doesn't linger;
+         *      abstains if the run isn't fully visible in this sector.
+         *   2. name_collides -- the sanitized name must not already
+         *      name a live sibling in this directory.
+         * Post-MVP: recompute the LFN checksum instead of dropping the
+         * run (preserves the long name; see fix_delete_preceding_lfn). */
+        if (fix_enabled() && (dflags & (DE_NAME_BAD_CHAR | DE_NAME_LOWERCASE
+                                      | DE_NAME_LEAD_SPACE))
+            && (ent[11] & 0x3Fu) != ATTR_LFN) {
+            LBA_t sect; WORD off;
+            LBA_t dir_start;
+            BYTE  new_name[11];
+            dirwalk_last_entry_location(&frame->walker, &sect, &off);
+            dirent_sanitize_name(ent, new_name);
+            dir_start = (*depth == 0u)
+                        ? ((fs->fs_type == FS_FAT32)
+                           ? chain_cluster_to_lba(fs, (DWORD)fs->dirbase)
+                           : fs->dirbase)
+                        : chain_cluster_to_lba(fs, frame->start_cluster);
+            if (name_collides(fs, frame->start_cluster, (*depth == 0u),
+                               sect, off, new_name)) {
+                fix_verbose_flush();
+                prt_str("  WARN: name-fix skipped, sanitized name '");
+                print_sfn(new_name);
+                prt_str("' collides with an existing entry\r\n");
+            } else if (!fix_delete_preceding_lfn(sect, off, dir_start)) {
+                warn_str("name-fix skipped, long-name entry spans a sector");
+            } else if (!fix_dir_name_set(sect, off, new_name)) {
+                warn_str("name-fix");
+            }
             dirwalk_buffer_dirty(&frame->walker);
         }
     }

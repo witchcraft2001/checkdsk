@@ -192,6 +192,67 @@ int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
     return 1;
 }
 
+int fix_dir_name_set(LBA_t sect, WORD off, const BYTE *new_name)
+{
+    UINT i;
+
+    if (!g_fix_enabled) return 1;
+    chain_invalidate();
+    if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
+    for (i = 0u; i < 11u; i++) g_sect_a[off + i] = new_name[i];
+    if (!fix_write(sect, g_sect_a, 1u)) return 0;
+    fix_count_applied();
+    return 1;
+}
+
+#define FIX_ATTR_LFN 0x0Fu
+
+int fix_delete_preceding_lfn(LBA_t sect, WORD off, LBA_t dir_start_sect)
+{
+    WORD scan_off;
+    WORD del_count;
+
+    if (!g_fix_enabled) return 1;
+
+    /* The directory's very first slot has nothing before it at all --
+     * not ambiguous, just empty. Every other off==0 means "this is a
+     * later sector of the directory and we can't see the one before
+     * it", which IS ambiguous (handled below). */
+    if (off == 0u && sect == dir_start_sect) return 1;
+
+    /* Pass 1: read-only. Walk backward one slot at a time while the
+     * preceding slot is LFN, staying inside this sector. */
+    if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
+    scan_off  = off;
+    del_count = 0u;
+    while (scan_off >= 32u
+           && (g_sect_a[scan_off - 32u + 11u] & 0x3Fu) == FIX_ATTR_LFN) {
+        scan_off -= 32u;
+        del_count++;
+    }
+    if (scan_off == 0u) {
+        /* Either off itself was this sector's first slot (no
+         * visibility into whatever precedes this sector), or the walk
+         * consumed every slot down to offset 0 and slot 0 was itself
+         * LFN (the run may continue into the previous sector). Either
+         * way we cannot rule out more of the run sitting where we
+         * cannot see it -- abstain, no writes at all. */
+        return 0;
+    }
+    if (del_count == 0u) return 1;   /* no LFN precedes; nothing to do */
+
+    chain_invalidate();
+    scan_off = off;
+    while (del_count-- > 0u) {
+        scan_off -= 32u;
+        if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
+        g_sect_a[scan_off] = 0xE5u;
+        if (!fix_write(sect, g_sect_a, 1u)) return 0;
+        fix_count_applied();
+    }
+    return 1;
+}
+
 void fix_print_summary(void)
 {
     if (g_fix_found == 0ul) return;

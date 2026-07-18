@@ -123,6 +123,19 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
     return flags;
 }
 
+void dirent_sanitize_name(const BYTE *e, BYTE *out)
+{
+    UINT i;
+    for (i = 0u; i < 11u; i++) {
+        BYTE c = e[i];
+        if (i == 0u && c == 0x05u) { out[i] = c; continue; }   /* KANJI escape */
+        if (i == 0u && c == 0x20u) { out[i] = (BYTE)'_'; continue; } /* lead space */
+        if (c == 0x20u)            { out[i] = c; continue; }        /* padding */
+        if (c >= 'a' && c <= 'z')  { out[i] = (BYTE)(c - ('a' - 'A')); continue; }
+        out[i] = is_forbidden_sfn_char(c) ? (BYTE)'_' : c;
+    }
+}
+
 void dirent_flags_print(UINT flags)
 {
     /* Table-driven: one loop, ~30 B vs N if-prt_str pairs. */
