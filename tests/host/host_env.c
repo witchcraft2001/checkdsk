@@ -307,5 +307,5 @@ void dss_getdate(dss_date_t *d) { d->year = 2026; d->month = 7; d->day = 17; d->
 void dss_gettime(dss_time_t *t) { t->hour = 12; t->minute = 0; t->second = 0; }
 
 int  dss_kbhit(void)              { return 0; }
-void dss_waitkey_ex(dss_key_t *k) { k->ascii = 0; k->scan = 0; k->mode = 0; }
+void dss_waitkey_ex(dss_key_t *k) { k->ascii = 0; k->scan = 0; k->modifiers = 0; k->locks = 0; }
 void dss_exit(u8 code)            { exit((int)code); }

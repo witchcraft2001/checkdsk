@@ -34,6 +34,13 @@ int  fix_enabled(void);
 void fix_enable_convert(void);
 int  fix_convert_enabled(void);
 
+/* Toggled by main.c on `/Y` parse. Suppresses the one-time WARNING
+ * gate fix_write() shows before its first actual disk write --
+ * consent is assumed. Has no effect without /F (fix_write no-ops
+ * before ever reaching the gate in that case). */
+void fix_enable_assume_yes(void);
+int  fix_assume_yes_enabled(void);
+
 /* Toggled by main.c on `/V` parse. When enabled, the long-running
  * passes (Phase 2 FAT scan, Phase 3 directory walk, Phase 4 sweep)
  * emit a progress indicator (one dot per chunk) so the user can tell
@@ -146,5 +153,19 @@ int  fix_dir_name_set(LBA_t sect, WORD off, const BYTE *new_name);
  * deleting, which preserves the long name and does not need this
  * boundary restriction. */
 int  fix_delete_preceding_lfn(LBA_t sect, WORD off, LBA_t dir_start_sect);
+
+/* Non-blocking abort poll -- ESC or Ctrl+C (raw ascii, modifier+letter,
+ * or modifier+scan-code, to work under both the LAT and RUS keyboard
+ * layouts; Ctrl+X/Ctrl+Z are deliberately NOT treated as abort here,
+ * per an earlier explicit user decision for this utility). Consumes
+ * the key if one is pending. Call periodically from any long-running
+ * scan loop (Phase 3 directory walk, Phase 4 lost-cluster sweep) --
+ * works identically with or without /F, since even a read-only scan
+ * on a large or badly damaged volume can run long enough that the
+ * user needs a way out. Returns non-zero if the user wants to abort;
+ * the caller does its own phase-specific cleanup (flush verbose dots,
+ * close any open batch, print a message) before returning -1 up the
+ * call chain the same way an I/O error would. */
+int fix_poll_abort(void);
 
 #endif /* CHKDSK_FIX_H */

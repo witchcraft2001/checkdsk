@@ -37,10 +37,11 @@ static void print_banner(void)
 static void print_usage(void)
 {
     print_banner();
-    prt_str("Usage: CHKDSK X: [/F] [/C] [/V]\r\n"
+    prt_str("Usage: CHKDSK X: [/F] [/C] [/V] [/Y]\r\n"
             "  /F  apply repairs\r\n"
             "  /C  with /F: orphans -> FILE####.CHK\r\n"
-            "  /V  verbose progress\r\n");
+            "  /V  verbose progress\r\n"
+            "  /Y  with /F: assume yes on the write warning\r\n");
 }
 
 /* Big aggregates kept in BSS so dispatch's stack frame stays small --
@@ -186,6 +187,10 @@ void main(void)
         }
         if (cmd_strieq(g_argv[i], "/V") || cmd_strieq(g_argv[i], "/VERBOSE")) {
             fix_enable_verbose();
+            continue;
+        }
+        if (cmd_strieq(g_argv[i], "/Y") || cmd_strieq(g_argv[i], "/YES")) {
+            fix_enable_assume_yes();
             continue;
         }
         if (drive_arg != (char *)0) {

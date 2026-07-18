@@ -21,6 +21,8 @@ A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the
 * Lost clusters — free them, or with `/F /C` link each chain into a `FILE####.CHK` entry in the root for manual recovery.
 * Invalid SFN characters, lowercase letters (including CP866 lowercase Cyrillic, which Estex-DSS itself cannot address by name -- see below) and a leading space — sanitized in place. Skipped (left flagged) if the sanitized name would collide with an existing entry in the same directory, or if an LFN run in front of the entry can't be resolved safely; either case prints why.
 
+Before the first sector actually gets written, `/F` shows `WARNING: about to write to disk. Press Y to continue, any other key to abort.` Any answer other than `Y` cancels for the rest of the run -- everything already found still gets reported, nothing more gets written, and the exit code reads as if `/F` had not been given at all. Pass `/Y` to assume yes and skip the prompt (for unattended/batch use).
+
 ## Exit codes
 
 | Code | Meaning |

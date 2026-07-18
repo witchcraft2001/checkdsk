@@ -17,6 +17,8 @@ static u8    g_fix_enabled = 0u;
 static u8    g_fix_convert = 0u;
 static u8    g_fix_verbose = 0u;
 static u8    g_fix_verbose_dirty = 0u;   /* a progress dot is on the current line */
+static u8    g_fix_assume_yes = 0u;
+static u8    g_fix_confirmed  = 0u;      /* WARNING gate already resolved "go" */
 static DWORD g_fix_found      = 0ul;
 static DWORD g_fix_applied    = 0ul;
 static u8    g_fix_incomplete = 0u;
@@ -27,6 +29,35 @@ void fix_enable_convert(void) { g_fix_convert = 1u; }
 int  fix_convert_enabled(void){ return g_fix_convert ? 1 : 0; }
 void fix_enable_verbose(void) { g_fix_verbose = 1u; }
 int  fix_verbose_enabled(void){ return g_fix_verbose ? 1 : 0; }
+void fix_enable_assume_yes(void)  { g_fix_assume_yes = 1u; }
+int  fix_assume_yes_enabled(void) { return g_fix_assume_yes ? 1 : 0; }
+
+/* specs.md Phase 5: "before any write to disk -- a mandatory warning".
+ * Fires exactly once, lazily, at the first call fix_write() actually
+ * reaches a disk_write. /Y (assume yes) skips it silently. Declining
+ * clears g_fix_enabled -- every repair site already guards its own
+ * attempt on fix_enabled(), so the rest of the run behaves like a
+ * plain read-only pass instead of retrying and failing one write at
+ * a time. */
+static int fix_confirm_write(void)
+{
+    dss_key_t k;
+
+    if (g_fix_confirmed) return 1;
+    if (g_fix_assume_yes) { g_fix_confirmed = 1u; return 1; }
+
+    fix_verbose_flush();
+    prt_str("WARNING: about to write to disk. "
+            "Press Y to continue, any other key to abort.\r\n");
+    dss_waitkey_ex(&k);
+    if (k.ascii == 'Y' || k.ascii == 'y') {
+        g_fix_confirmed = 1u;
+        return 1;
+    }
+    prt_str("Aborted: no changes written.\r\n");
+    g_fix_enabled = 0u;
+    return 0;
+}
 
 void fix_verbose_tick(void)
 {
@@ -53,6 +84,7 @@ int  fix_any_incomplete(void)   { return g_fix_incomplete ? 1 : 0; }
 int fix_write(LBA_t lba, const BYTE *buf, UINT count)
 {
     if (!g_fix_enabled) return 1;
+    if (!fix_confirm_write()) return 0;
     if (disk_write(0u, buf, lba, count) == RES_OK) return 1;
     fix_count_incomplete();
     return 0;
@@ -256,6 +288,22 @@ int fix_delete_preceding_lfn(LBA_t sect, WORD off, LBA_t dir_start_sect)
         fix_count_applied();
     }
     return 1;
+}
+
+int fix_poll_abort(void)
+{
+    dss_key_t k;
+
+    if (!dss_kbhit()) return 0;
+    dss_waitkey_ex(&k);
+    if (k.ascii == 27u                            /* ESC */
+        || k.ascii == 0x03u                       /* raw Ctrl+C, LAT keymap */
+        || ((k.modifiers & DSS_KEYMOD_CTRL)
+            && (k.ascii == 'C' || k.ascii == 'c'  /* Ctrl+C, modifier+letter */
+             || k.scan == 0x2Cu))) {              /* Ctrl+C, RUS keymap (scan-code) */
+        return 1;
+    }
+    return 0;
 }
 
 void fix_print_summary(void)

@@ -456,7 +456,13 @@ static int step(vol_t *fs, BYTE *depth)
     }
 
     t->entries++;
-    if ((t->entries & 0x7Ful) == 0ul) fix_verbose_tick();
+    if ((t->entries & 0x7Ful) == 0ul) {
+        fix_verbose_tick();
+        if (fix_poll_abort()) {
+            warn_str("aborted");
+            return -1;
+        }
+    }
     dflags    = dirent_validate(fs, ent);
     cflags    = 0u;
     chain_len = 0ul;
@@ -1288,6 +1294,10 @@ static int phase4_lost(vol_t *fs)
 
         for (cc = 2ul; cc < fs->n_fatent; cc++) {
             DWORD v;
+            if ((cc & 0x7Ful) == 0ul) {
+                fix_verbose_tick();
+                if (fix_poll_abort()) { warn_str("aborted"); return -1; }
+            }
             if (bitmap_get((u32)cc)) continue;
             v = chain_get_entry(fs, cc);
             if (v == CHAIN_READ_ERROR) { err_str("FAT read"); return -1; }
@@ -1317,7 +1327,9 @@ static int phase4_lost(vol_t *fs)
                 chain_invalidate();
             } else {
                 if (fix_enabled()) {
-                    if (!fix_fat_set(fs, cc, 0ul)) { err_str("FAT free"); return -1; }
+                    /* Soft failure -- see the FAT16/32 free-mode branch
+                     * below for why this must not abort the sweep. */
+                    if (!fix_fat_set(fs, cc, 0ul)) warn_str("FAT free");
                 }
                 lost_n++;
             }
@@ -1362,6 +1374,11 @@ static int phase4_lost(vol_t *fs)
         u8    si;
 
         fix_verbose_tick();
+        if (fix_poll_abort()) {
+            warn_str("aborted");
+            diskio_batch_close();
+            return -1;
+        }
 
         if (!diskio_batch_read((unsigned long)(fat1 + (LBA_t)sec_idx),
                                batch, 0u)) {
@@ -1436,16 +1453,12 @@ static int phase4_lost(vol_t *fs)
                             warn_str("FILE write");
                         }
                     } else {
-                        /* Press ESC to abort the conversion run. */
+                        /* Press ESC or Ctrl+C to abort the conversion run. */
                         warn_str("no slot");
-                        if (dss_kbhit()) {
-                            dss_key_t k;
-                            dss_waitkey_ex(&k);
-                            if (k.ascii == 27u) {
-                                warn_str("aborted");
-                                diskio_batch_close();
-                                return -1;
-                            }
+                        if (fix_poll_abort()) {
+                            warn_str("aborted");
+                            diskio_batch_close();
+                            return -1;
                         }
                     }
                 } else {
@@ -1457,9 +1470,12 @@ static int phase4_lost(vol_t *fs)
                      * clobber the single-sector repairs. */
                     if (fix_enabled()) {
                         if (!fix_fat_set(fs, cc, 0ul)) {
-                            err_str("FAT free");
-                            diskio_batch_close();
-                            return -1;
+                            /* Soft failure, same as every other repair
+                             * site (e.g. chain-trunc above) -- a
+                             * declined WARNING gate or a transient
+                             * write error here doesn't warrant aborting
+                             * the whole sweep, just this one cluster. */
+                            warn_str("FAT free");
                         }
                     }
                     lost_n++;

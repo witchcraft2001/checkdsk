@@ -51,6 +51,7 @@ int main(int argc, char **argv)
         if (!strcasecmp(a, "/F") || !strcasecmp(a, "-f"))      fix_enable();
         else if (!strcasecmp(a, "/C") || !strcasecmp(a, "-c")) fix_enable_convert();
         else if (!strcasecmp(a, "/V") || !strcasecmp(a, "-v")) fix_enable_verbose();
+        else if (!strcasecmp(a, "/Y") || !strcasecmp(a, "-y")) fix_enable_assume_yes();
         else if (!img)                                         img = a;
         else { fprintf(stderr, "too many args\n"); return CHKDSK_RC_FATAL; }
     }

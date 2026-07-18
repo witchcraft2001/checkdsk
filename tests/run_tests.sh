@@ -58,8 +58,8 @@ run_case() {
     # finding on re-scan). Only 255 (fatal: scan aborted, OOM, mount
     # failure) is a hard stop. 1 should never come back under /F --
     # dispatch() only returns it in read-only mode.
-    local args=("/F")
-    [ "$mode" = "FC" ] && args=("/F" "/C")
+    local args=("/F" "/Y")
+    [ "$mode" = "FC" ] && args=("/F" "/C" "/Y")
     local i
     for i in $(seq 1 $MAX_PASSES); do
         "$HOST" "$img" "${args[@]}" >>"$log" 2>&1
@@ -130,7 +130,7 @@ for fs in "${fstypes[@]}"; do
         echo "$tag DETECT FAIL (ro exit=$rc, want 1)"; fail=$((fail+1)); failures+=("$fs/badname_collide/detect"); continue
     fi
 
-    "$HOST" "$img" /F >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >>"$log" 2>&1
     "$HOST" "$img" >>"$log" 2>&1
     rc=$?
     if [ $rc -eq 0 ]; then
@@ -160,7 +160,7 @@ for fs in "${fstypes[@]}"; do
     python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
     off=$(python3 "$MKIMG" locate "$img" "README  TXT" 2>>"$log")
     python3 "$MKIMG" corrupt "$img" badname_cyr >>"$log" 2>&1
-    "$HOST" "$img" /F >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >>"$log" 2>&1
     if python3 "$MKIMG" checkbyte "$img" "$((off + 8))" 0x80 >>"$log" 2>&1; then
         echo "$tag ok"
         pass=$((pass+1))
@@ -168,6 +168,36 @@ for fs in "${fstypes[@]}"; do
         echo "$tag FAIL: byte not folded to uppercase"
         tail -5 "$log" | sed 's/^/    /'
         fail=$((fail+1)); failures+=("$fs/badname_cyr/fold")
+    fi
+done
+
+# WARNING-gate decline guard: /F without /Y must show the one-time
+# write warning and wait for a keypress via dss_waitkey_ex -- the host
+# shim always returns ascii=0 (never 'Y'), so the gate must decline,
+# fix_write must never reach disk_write, and dispatch() must report
+# exit 1 (found, unfixed) rather than 2/3, exactly as a plain read-only
+# run would. Byte-for-byte image comparison proves no write slipped
+# through before the decline was noticed.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-warngate.img"
+    tag="[$fs/warngate]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" orphan >>"$log" 2>&1
+    sum_before=$(cksum "$img")
+
+    "$HOST" "$img" /F >>"$log" 2>&1
+    rc=$?
+    sum_after=$(cksum "$img")
+
+    if [ "$sum_before" != "$sum_after" ]; then
+        echo "$tag FAIL: image modified despite a declined WARNING gate"
+        fail=$((fail+1)); failures+=("$fs/warngate/no-write")
+    elif [ $rc -ne 1 ]; then
+        echo "$tag FAIL: exit=$rc, want 1 (declined -> found-unfixed)"
+        fail=$((fail+1)); failures+=("$fs/warngate/exitcode")
+    else
+        echo "$tag ok (declined, no writes, exit=1)"
+        pass=$((pass+1))
     fi
 done
 
