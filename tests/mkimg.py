@@ -418,6 +418,16 @@ def corrupt(img, g, scenario):
         chain = alloc_chain(img, g, 1)
         write_chain_data(img, g, chain, content_for("BADLFN", g.clus_bytes()))
         add_entry(img, g, 0, dirent("BAD*FILETXT", 0x20, chain[0], g.clus_bytes()))
+    elif scenario == "badname_cyr":
+        # README's extension byte 0 becomes CP866 lowercase Cyrillic
+        # 'a' (0xA0, DOS_Proc.asm UPPER range 0xA0-0xAF) -- must fold
+        # to uppercase (0x80) under /F like Estex-DSS's own UPPER
+        # routine, not get replaced with '_' like a real forbidden
+        # character. README, not FILE2/DEEP -- verify()'s V6 content
+        # check anchors on the latter two by their unchanged literal
+        # name and would false-fail once this byte folds.
+        off, _ = find_file_chain(img, g, "README  TXT")
+        img[off + 8] = 0xA0
     elif scenario == "badname_collide":
         # A lowercase twin of the existing FILE2 entry: sanitizing it
         # (uppercase) would exactly collide with FILE2's own name. The
@@ -578,6 +588,23 @@ def main():
         ok = has_live_entry(img, g, 0, sys.argv[3])
         print("PRESENT" if ok else "ABSENT")
         return 0 if ok else 1
+    if cmd == "locate":
+        # Print the absolute byte offset of name83's dirent. Must be
+        # run against a still-ASCII (pre-corruption) name -- find_file_
+        # chain compares via ascii-decode, which can't match a name
+        # already holding a high byte.
+        img, g = load(path)
+        off, _ = find_file_chain(img, g, sys.argv[3])
+        print(off)
+        return 0
+    if cmd == "checkbyte":
+        # args: path abs-offset expected-hex-byte
+        img, g = load(path)
+        off = int(sys.argv[3])
+        want = int(sys.argv[4], 16)
+        got = img[off]
+        print("byte@%d = %#04x (want %#04x)" % (off, got, want))
+        return 0 if got == want else 1
     print("unknown command %r" % cmd)
     return 2
 

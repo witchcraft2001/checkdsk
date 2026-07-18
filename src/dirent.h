@@ -31,7 +31,8 @@
 #include "vol.h"
 
 #define DE_NAME_BAD_CHAR     0x0001u  /* control or forbidden punctuation */
-#define DE_NAME_LOWERCASE    0x0002u  /* lowercase letter in SFN */
+#define DE_NAME_LOWERCASE    0x0002u  /* lowercase a-z, or CP866 lowercase
+                                          Cyrillic (see dirent.c) in SFN */
 #define DE_NAME_LEAD_SPACE   0x0004u  /* SFN starts with space */
 #define DE_ATTR_RESERVED     0x0008u  /* attr bits 6 or 7 set */
 #define DE_DIR_NONZERO_SIZE  0x0010u  /* directory entry size != 0 */
@@ -57,9 +58,11 @@ UINT dirent_validate(vol_t *fs, const BYTE *e);
 void dirent_flags_print(UINT flags);
 
 /* Build a spec-compliant 11-byte SFN name into out[11] from e's raw
- * name field: replaces a literal leading space, any forbidden
- * punctuation/control byte, and any literal lowercase a-z with '_' or
- * its uppercase equivalent. Padding spaces and the KANJI 0xE5-escape
+ * name field: replaces a literal leading space and any forbidden
+ * punctuation/control byte with '_', and case-folds any lowercase a-z
+ * or CP866 lowercase Cyrillic byte to its uppercase equivalent (the
+ * same fold Estex-DSS itself applies on every name-based CREATE /
+ * RENAME -- see dirent.c). Padding spaces and the KANJI 0xE5-escape
  * byte are left untouched. Safe to call whenever dirent_validate
  * flagged DE_NAME_BAD_CHAR, DE_NAME_LOWERCASE or DE_NAME_LEAD_SPACE. */
 void dirent_sanitize_name(const BYTE *e, BYTE *out);

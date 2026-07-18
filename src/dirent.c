@@ -43,6 +43,37 @@ static int is_forbidden_sfn_char(BYTE c)
     }
 }
 
+/* CP866 lowercase Cyrillic, mirroring Estex-DSS's own UPPER routine
+ * (DOS_Proc.asm, ~209-230): a-p (0xA0-0xAF), r-ya (0xE0-0xEF), yo
+ * (0xF1). DSS folds these to uppercase on every name-based CREATE /
+ * RENAME, so a raw SFN byte sitting in one of these ranges can only
+ * have reached disk through a tool that bypassed DSS's own name
+ * pipeline (e.g. a raw archive-extraction write) -- and DSS's own
+ * DELETE / FIND can then never match it again, because the search
+ * pattern gets folded to uppercase before the exact-byte compare
+ * while the stored byte stays lowercase. Uppercase Cyrillic
+ * (0x80-0x9F, 0xF0) and non-letter high bytes (0xB0-0xDF pseudo-
+ * graphics, 0xF2-0xFF) round-trip fine and are legitimate -- treated
+ * the same as any other byte, not touched here. */
+static int is_dss_lower_cyrillic(BYTE c)
+{
+    return (c >= 0xA0u && c <= 0xAFu)
+        || (c >= 0xE0u && c <= 0xEFu)
+        || (c == 0xF1u);
+}
+
+/* Case-fold one SFN byte the same way DSS's own UPPER routine does:
+ * ASCII a-z, or the CP866 lowercase-Cyrillic ranges above. Anything
+ * else is returned unchanged. */
+static BYTE dss_upper(BYTE c)
+{
+    if (c >= 'a' && c <= 'z')     return (BYTE)(c - ('a' - 'A'));
+    if (c >= 0xA0u && c <= 0xAFu) return (BYTE)(c - 0x20u);
+    if (c >= 0xE0u && c <= 0xEFu) return (BYTE)(c - 0x50u);
+    if (c == 0xF1u)               return 0xF0u;
+    return c;
+}
+
 #define ld_dword_le(p) vol_ld_d(p)
 #define ld_word_le(p)  vol_ld_w(p)
 
@@ -73,7 +104,8 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
         BYTE c = e[i];
         if (i == 0u && c == 0x05u) continue; /* KANJI 0xE5 escape */
         if (c == 0x20u) continue;            /* padding */
-        if (c >= 'a' && c <= 'z') flags |= DE_NAME_LOWERCASE;
+        if ((c >= 'a' && c <= 'z') || is_dss_lower_cyrillic(c))
+            flags |= DE_NAME_LOWERCASE;
         if (is_forbidden_sfn_char(c)) flags |= DE_NAME_BAD_CHAR;
     }
 
@@ -131,7 +163,10 @@ void dirent_sanitize_name(const BYTE *e, BYTE *out)
         if (i == 0u && c == 0x05u) { out[i] = c; continue; }   /* KANJI escape */
         if (i == 0u && c == 0x20u) { out[i] = (BYTE)'_'; continue; } /* lead space */
         if (c == 0x20u)            { out[i] = c; continue; }        /* padding */
-        if (c >= 'a' && c <= 'z')  { out[i] = (BYTE)(c - ('a' - 'A')); continue; }
+        if ((c >= 'a' && c <= 'z') || is_dss_lower_cyrillic(c)) {
+            out[i] = dss_upper(c);
+            continue;
+        }
         out[i] = is_forbidden_sfn_char(c) ? (BYTE)'_' : c;
     }
 }

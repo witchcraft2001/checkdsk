@@ -28,7 +28,7 @@ trap 'rm -rf "$WORK"' EXIT
 fstypes=("$@")
 [ ${#fstypes[@]} -eq 0 ] && fstypes=(fat16 fat12 fat32)
 
-scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn)
+scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_cyr)
 modes=("F" "FC")
 
 pass=0
@@ -139,6 +139,29 @@ for fs in "${fstypes[@]}"; do
     else
         echo "$tag ok (skipped, both names intact)"
         pass=$((pass+1))
+    fi
+done
+
+# CP866 lowercase-Cyrillic fold: badname_cyr's corrupted byte (0xA0)
+# must fold to uppercase (0x80) under /F, not get replaced with '_'
+# (0x5F) like an ordinary forbidden character -- see dirent_sanitize_name.
+# Locate the dirent BEFORE corrupting it: find_file_chain matches via
+# ascii-decode, which can never match a name already holding a raw
+# high byte, so the offset has to be captured while it's still ASCII.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-badname_cyr.img"
+    tag="[$fs/badname_cyr/fold]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    off=$(python3 "$MKIMG" locate "$img" "README  TXT" 2>>"$log")
+    python3 "$MKIMG" corrupt "$img" badname_cyr >>"$log" 2>&1
+    "$HOST" "$img" /F >>"$log" 2>&1
+    if python3 "$MKIMG" checkbyte "$img" "$((off + 8))" 0x80 >>"$log" 2>&1; then
+        echo "$tag ok"
+        pass=$((pass+1))
+    else
+        echo "$tag FAIL: byte not folded to uppercase"
+        tail -5 "$log" | sed 's/^/    /'
+        fail=$((fail+1)); failures+=("$fs/badname_cyr/fold")
     fi
 done
 
