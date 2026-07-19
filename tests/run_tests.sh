@@ -22,6 +22,16 @@ WORK="${TMPDIR:-/tmp}/chkdsk_tests.$$"
 # one extra pass; each pass must strictly shrink the damage.
 MAX_PASSES=3
 
+# Build the host binary from the current sources before doing anything
+# else. Without this the suite silently exercises whatever binary was
+# left in tests/host from a previous session, so a source change could
+# "pass" without ever having been compiled.
+if ! make -C "$script_dir/host" >/dev/null; then
+    echo "FATAL: host build failed"
+    make -C "$script_dir/host"
+    exit 1
+fi
+
 mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -159,12 +169,11 @@ for fs in "${fstypes[@]}"; do
         echo "$tag FAIL: cross-sector LFN was not preserved/restamped"
         fail=$((fail+1)); failures+=("$fs/lfn_restamp_cross/preserve")
     else
-        # FAT32 adds one separate applied fix when the successful directory
-        # write invalidates FSInfo for DSS to recalculate on remount.
-        want_applied=1
-        [ "$fs" = fat32 ] && want_applied=2
-        if ! grep -q "Fixes: found=1 applied=$want_applied" "$out"; then
-            echo "$tag FAIL: logical fix counters are not 1/$want_applied"
+        # Uniform across FAT types: FSInfo invalidation is a bookkeeping
+        # side-effect of an already-counted repair, so it no longer bumps
+        # "applied" on FAT32. applied must never exceed found.
+        if ! grep -q "Fixes: found=1 applied=1" "$out"; then
+            echo "$tag FAIL: logical fix counters are not 1/1"
             fail=$((fail+1)); failures+=("$fs/lfn_restamp_cross/count")
         else
             echo "$tag ok (cross-sector group preserved, one logical fix)"
@@ -314,6 +323,18 @@ for fs in "${fstypes[@]}"; do
     tot_bytes=$(grep 'bytes total disk space'       "$rout" | awk '{print $1}' | strip)
     pre_total=$(grep 'Total clusters:'              "$rout" | awk '{print $3}' | strip)
     free_ph2=$(grep -o 'free=[0-9]*'                "$rout" | head -1 | cut -d= -f2 | strip)
+    used_ph2=$(grep -o 'used=[0-9]*'                "$rout" | head -1 | cut -d= -f2 | strip)
+    inval_ph2=$(grep -o 'invalid=[0-9]*'            "$rout" | head -1 | cut -d= -f2 | strip)
+
+    # The two accounting identities. Both were silently violated before:
+    # Phase 2 printed "used" without the per-chain EOC terminators, and
+    # the report omitted the FAT32 root directory's own clusters.
+    files_b=$(grep 'bytes in .* user files'         "$rout" | awk '{print $1}' | strip)
+    dirs_b=$(grep 'bytes in .* directories'         "$rout" | awk '{print $1}' | strip)
+    bad_b=$(grep 'bytes in bad sectors'             "$rout" | awk '{print $1}' | strip)
+    avail_b=$(grep 'bytes available on disk'        "$rout" | awk '{print $1}' | strip)
+    ph2_sum=$((free_ph2 + used_ph2 + inval_ph2))
+    rep_sum=$((files_b + dirs_b + bad_b + avail_b))
 
     if [ -z "$tot_units" ] || [ -z "$avail_units" ] || [ -z "$unit_sz" ]; then
         echo "$tag FAIL: report block missing or malformed"
@@ -328,6 +349,12 @@ for fs in "${fstypes[@]}"; do
     elif [ "$tot_bytes" != "$((tot_units * unit_sz))" ]; then
         echo "$tag FAIL: total bytes $tot_bytes != units*size $((tot_units * unit_sz))"
         fail=$((fail+1)); failures+=("$fs/report/bytes")
+    elif [ "$ph2_sum" != "$tot_units" ]; then
+        echo "$tag FAIL: phase2 free+used+invalid $ph2_sum != total units $tot_units"
+        fail=$((fail+1)); failures+=("$fs/report/ph2sum")
+    elif [ "$rep_sum" != "$tot_bytes" ]; then
+        echo "$tag FAIL: files+dirs+bad+avail $rep_sum != total bytes $tot_bytes"
+        fail=$((fail+1)); failures+=("$fs/report/sum")
     else
         echo "$tag ok (units=$tot_units free=$avail_units, files+dirs bytes reported)"
         pass=$((pass+1))

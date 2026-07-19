@@ -102,7 +102,7 @@ typedef struct {
     unsigned long used_n;
     unsigned long bad_n;
     unsigned long invalid_n;
-    unsigned long eoc_n;     /* end-of-chain markers in user clusters (rare) */
+    unsigned long eoc_n;     /* chain terminators -- one per file/dir chain */
     int           detail_left;
 } cnt_t;
 
@@ -477,7 +477,13 @@ int fat_invalidate_fsinfo(vol_t *fs)
      * means "unknown -- recompute on next use" (FAT spec, valid). */
     for (i = 488u; i < 496u; i++) g_fat_a[i] = 0xFFu;
     if (!fix_write(fs->fsi_sector, g_fat_a, 1u)) return 0;
-    fix_count_applied();
+    /* Deliberately NOT fix_count_applied(). Invalidating FSInfo is a
+     * bookkeeping side-effect of repairs that were already counted --
+     * main.c only calls this when fix_any_applied() is set -- not an
+     * independent repair with its own "found" issue behind it. Counting
+     * it printed the self-contradictory "found=3 applied=4" on FAT32:
+     * more fixes applied than problems found. FAT12/16 have no FSInfo
+     * sector and were never affected. */
     prt_str("  FSInfo: free_count/next_free invalidated for recalc\r\n");
     return 1;
 }
@@ -526,7 +532,12 @@ int fat_check(vol_t *fs)
     prt_str("  free=");
     prt_dec(c.free_n);
     prt_str(" used=");
-    prt_dec(c.used_n);
+    /* "used" means allocated clusters, so BOTH classes count: used_n
+     * holds the entries that point at a successor, eoc_n the terminator
+     * that ends each chain. Printing used_n alone under-reported by
+     * exactly one cluster per file and per directory, so the line did
+     * not satisfy free + used + bad + invalid == total clusters. */
+    prt_dec(c.used_n + c.eoc_n);
     prt_str(" invalid=");
     prt_dec(c.invalid_n);
     prt_nl();

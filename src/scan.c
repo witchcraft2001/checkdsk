@@ -120,6 +120,25 @@ typedef struct {
 /* Uninit at boot is fine: walk_tree zeroes every field before use. */
 static scan_totals_t g_totals;
 
+/* Length of the FAT32 root-directory chain, captured by scan_run when it
+ * claims that chain in the bitmap. The root has no directory entry of
+ * its own, so walk_tree never sees it and g_totals.dir_clusters excludes
+ * it -- which left the report's components short of the total by the
+ * size of the root. Stays 0 on FAT12/16, whose root occupies a reserved
+ * region outside the cluster heap and so is outside this accounting.
+ *
+ * Reset in scan_run, not at declaration: _DATA is not zeroed at load. */
+static DWORD g_root_clusters;
+
+/* Clusters actually released by the Phase 4 free pass -- successful
+ * fix_fat_set calls only, so a soft write failure does not inflate it.
+ * scan_print_report adds this to the Phase 2 free count: the classic
+ * report is expected to describe the volume as it stands after the
+ * repairs, and Phase 2's snapshot still counts every orphan as
+ * allocated. /C conversion contributes nothing here -- a converted
+ * chain keeps its clusters, it just gains a FILE####.CHK entry. */
+static DWORD g_freed_clusters;
+
 /* Running LFN-group state for Phase 3. A single global -- NOT per-frame
  * -- is correct and sufficient: an LFN group always sits immediately in
  * front of its SFN within one directory and is never interrupted by a
@@ -1447,6 +1466,7 @@ extend_fail:
 static int phase4_lost(vol_t *fs)
 {
     DWORD lost_n   = 0ul;
+    DWORD freed_n  = 0ul;
     DWORD chain_n  = 0ul;
     DWORD seq      = 1ul;
     DWORD sec_idx;
@@ -1508,6 +1528,7 @@ static int phase4_lost(vol_t *fs)
                     /* Soft failure -- see the FAT16/32 free-mode branch
                      * below for why this must not abort the sweep. */
                     if (!fix_fat_set(fs, cc, 0ul)) warn_str("FAT free");
+                    else                           freed_n++;
                 }
                 lost_n++;
             }
@@ -1654,6 +1675,8 @@ static int phase4_lost(vol_t *fs)
                              * write error here doesn't warrant aborting
                              * the whole sweep, just this one cluster. */
                             warn_str("FAT free");
+                        } else {
+                            freed_n++;
                         }
                     }
                     lost_n++;
@@ -1678,11 +1701,18 @@ phase4_report:
         fix_count_found();
         fix_count_applied();
     } else if (fix_enabled()) {
+        /* Report what actually got released, not what was found: a
+         * cluster whose fix_fat_set failed above is still allocated, and
+         * its WARN line already told the user so. Same reason the
+         * "applied" bump is conditional -- freeing nothing is not a
+         * fix. fix_write has already recorded the incompleteness, so
+         * the exit code separates 3 (partial) from 2 (all fixed). */
+        g_freed_clusters = freed_n;
         prt_str("  Freed ");
-        prt_dec((unsigned long)lost_n);
+        prt_dec((unsigned long)freed_n);
         prt_str(" lost cluster(s)\r\n");
         fix_count_found();
-        fix_count_applied();
+        if (freed_n != 0ul) fix_count_applied();
     } else {
         prt_str("  Found ");
         prt_dec((unsigned long)lost_n);
@@ -1695,6 +1725,9 @@ phase4_report:
 int scan_run(vol_t *fs)
 {
     int lost_rc;
+
+    g_root_clusters  = 0ul;
+    g_freed_clusters = 0ul;
 
     prt_str("Phase 3: directory and chain walk\r\n");
 
@@ -1716,7 +1749,10 @@ int scan_run(vol_t *fs)
      * itself. The claim-walk also EOC-terminates a rotten root chain
      * under /F, same as any other chain repair. */
     if (fs->fs_type == FS_FAT32) {
-        (void)phase4_walk_chain(fs, (DWORD)fs->dirbase);
+        /* Nothing but clusters 0/1 is claimed yet, so the walk always
+         * runs the full chain and its return value is the true root
+         * length -- see g_root_clusters. */
+        g_root_clusters = phase4_walk_chain(fs, (DWORD)fs->dirbase);
     }
 #endif
 
@@ -1750,7 +1786,7 @@ int scan_run(vol_t *fs)
                + g_totals.excess + g_totals.lfn_bad) + lost_rc;
 }
 
-/* Classic chkdsk-style space report (specs.md "Отчёт в конце работы").
+/* Classic chkdsk-style space report (specs.md "end-of-run report").
  * free/bad cluster counts come from Phase 2 (fat_free_clusters /
  * fat_bad_clusters, passed in so scan.c need not depend on fat.c); the
  * file/dir tallies come from the Phase 3 walk above. Must run before
@@ -1766,6 +1802,12 @@ void scan_print_report(vol_t *fs, DWORD free_clusters, DWORD bad_clusters)
     BYTE  csh            = (BYTE)(fs->csize_shift + 9u);
     DWORD cluster_bytes  = (DWORD)fs->csize << 9;
     DWORD total_clusters = fs->n_fatent - 2ul;
+
+    /* Phase 2 counted the volume as it was found, with every orphan
+     * still marked allocated. Phase 4 may since have released some, so
+     * fold those in -- otherwise a /F run that just freed clusters ends
+     * by reporting the pre-repair free space. 0 without /F. */
+    free_clusters += g_freed_clusters;
 
     prt_nl();
     prt_str("Volume Serial Number is ");
@@ -1785,8 +1827,12 @@ void scan_print_report(vol_t *fs, DWORD free_clusters, DWORD bad_clusters)
     prt_dec((unsigned long)g_totals.files);
     prt_str(" user files\r\n");
 
+    /* g_root_clusters is folded into the byte figure but NOT into the
+     * entry count: on FAT32 the root occupies real clusters that have to
+     * show up somewhere for the components to add up, yet it has no
+     * directory entry anywhere to count. On FAT12/16 it is 0. */
     prt_str("  ");
-    prt_dec((unsigned long)(g_totals.dir_clusters << csh));
+    prt_dec((unsigned long)((g_totals.dir_clusters + g_root_clusters) << csh));
     prt_str(" bytes in ");
     prt_dec((unsigned long)g_totals.dir_entries);
     prt_str(" directories\r\n");
