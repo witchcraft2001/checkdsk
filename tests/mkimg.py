@@ -621,6 +621,16 @@ def corrupt(img, g, scenario):
         struct.pack_into("<H", img, off + 24, (41 << 9) | (2 << 5) | 29)
         off, _ = find_file_chain(img, g, "README  TXT")
         struct.pack_into("<H", img, off + 24, (40 << 9) | (2 << 5) | 29)
+    elif scenario == "badtime_ntres":
+        # One entry gets BOTH a reserved NTRES byte and an out-of-range
+        # write time -- the combination observed on real FAT32 hardware
+        # that produced "Fixes: found=7 applied=8" (offset 12 and offset
+        # 22..23 sit next to each other in the dirent and broke together
+        # in practice). The repair pack must count this as ONE logical
+        # repair, not two.
+        off, _ = find_file_chain(img, g, "FILE1   TXT")
+        img[off + 12] = 0xFF
+        struct.pack_into("<H", img, off + 22, (25 << 11) | (61 << 5) | 31)
     elif scenario == "fsinfo":
         # FAT32 only: FSInfo caches a free_count that contradicts the FAT.
         # Deliberately not 0xFFFFFFFF -- that value means "unknown" and is

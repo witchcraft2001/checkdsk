@@ -189,11 +189,14 @@ int fix_fat_set(vol_t *fs, DWORD clust, DWORD value)
     return 1;
 }
 
-int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
+/* Shared body of fix_dir_patch / fix_dir_patch_raw: read-modify-write
+ * with no counter side effect, so a caller that issues several patches
+ * against one logical repair can bump "applied" exactly once for the
+ * whole group instead of once per patch. */
+static int dir_patch_apply(LBA_t sect, WORD off, u8 kind, DWORD value)
 {
     const BYTE *vb = (const BYTE *)&value;  /* SDCC z80 stores LSB first */
 
-    if (!g_fix_enabled) return 1;
     /* See fix_fat_set for why this is required. */
     chain_invalidate();
     if (disk_read(0u, g_sect_a, sect, 1u) != RES_OK) return 0;
@@ -245,9 +248,27 @@ int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
         g_sect_a[off + 31u] = vb[3];
         break;
     }
-    if (!fix_write(sect, g_sect_a, 1u)) return 0;
+    return fix_write(sect, g_sect_a, 1u) ? 1 : 0;
+}
+
+int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
+{
+    if (!g_fix_enabled) return 1;
+    if (!dir_patch_apply(sect, off, kind, value)) return 0;
     fix_count_applied();
     return 1;
+}
+
+/* Same read-modify-write as fix_dir_patch but does NOT bump "applied" --
+ * for a caller issuing several patches against ONE logical repair (the
+ * dirent repair pack in scan.c), which must count the whole group once
+ * to honor fix_count_applied's "one repair-site call per completed
+ * repair" contract. The caller bumps fix_count_applied() itself once
+ * the whole group has succeeded. */
+int fix_dir_patch_raw(LBA_t sect, WORD off, u8 kind, DWORD value)
+{
+    if (!g_fix_enabled) return 1;
+    return dir_patch_apply(sect, off, kind, value);
 }
 
 int fix_dir_name_set(LBA_t sect, WORD off, const BYTE *new_name)

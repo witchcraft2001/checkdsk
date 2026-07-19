@@ -766,24 +766,42 @@ static int step(vol_t *fs, BYTE *depth)
         }
 
         /* MVP dirent repair pack (specs.md:278-282). Each safe-to-apply
-         * dflag triggers one fix_dir_patch. Skipped on ATTR_LFN slots
-         * (no SFN structure) and on . / .. entries (filtered out at
-         * the top of step). Inlined as an if-cascade -- table-driven
-         * version added ~20 B vs hand-rolled because the table itself
-         * (2 entries * 3 B + per-iter loop overhead) outweighed the
-         * common-prefix savings at three masks. */
+         * dflag triggers one patch. Skipped on ATTR_LFN slots (no SFN
+         * structure) and on . / .. entries (filtered out at the top of
+         * step). Inlined as an if-cascade -- table-driven version added
+         * ~20 B vs hand-rolled because the table itself (2 entries * 3 B
+         * + per-iter loop overhead) outweighed the common-prefix savings
+         * at three masks.
+         *
+         * An entry can carry more than one of these flags at once (a
+         * corrupt NTRES byte and a corrupt adjacent date word are
+         * physically next to each other and often break together, as
+         * seen on real hardware), which means more than one patch call
+         * for what is still ONE logical repair. So each call here goes
+         * through fix_dir_patch_raw (no per-call counter bump), and
+         * fix_count_applied() is called once at the end for the whole
+         * group -- otherwise "applied" overcounts relative to "found"
+         * (found=7 applied=8 was observed on a real FAT32 volume where
+         * one entry had both DE_NTRES_RSV and DE_BAD_TIMESTAMP). */
         if (fix_enabled() && (dflags & (DE_ATTR_RESERVED | DE_NTRES_RSV
                                       | DE_FAT16_HI_CLUST | DE_BAD_TIMESTAMP))
             && (ent[11] & 0x3Fu) != ATTR_LFN) {
             LBA_t sect; WORD off;
-            int   ok = 1;
+            int   ok      = 1;
+            int   patched = 0;
             dirwalk_last_entry_location(&frame->walker, &sect, &off);
-            if (ok && (dflags & DE_ATTR_RESERVED))
-                ok = fix_dir_patch(sect, off, FIX_DPATCH_ATTR_MASK, 0ul);
-            if (ok && (dflags & DE_NTRES_RSV))
-                ok = fix_dir_patch(sect, off, FIX_DPATCH_NTRES_FIX, 0ul);
-            if (ok && (dflags & DE_FAT16_HI_CLUST))
-                ok = fix_dir_patch(sect, off, FIX_DPATCH_HI_CLUST_ZERO, 0ul);
+            if (ok && (dflags & DE_ATTR_RESERVED)) {
+                ok = fix_dir_patch_raw(sect, off, FIX_DPATCH_ATTR_MASK, 0ul);
+                if (ok) patched = 1;
+            }
+            if (ok && (dflags & DE_NTRES_RSV)) {
+                ok = fix_dir_patch_raw(sect, off, FIX_DPATCH_NTRES_FIX, 0ul);
+                if (ok) patched = 1;
+            }
+            if (ok && (dflags & DE_FAT16_HI_CLUST)) {
+                ok = fix_dir_patch_raw(sect, off, FIX_DPATCH_HI_CLUST_ZERO, 0ul);
+                if (ok) patched = 1;
+            }
             /* Recomputed rather than carried down from the validate
              * call: the mask says WHICH of the five fields to reset,
              * and dflags only has room for the one summary bit. The
@@ -791,11 +809,14 @@ static int step(vol_t *fs, BYTE *depth)
              * above touches attr/NTRES/cluster, never a date field. */
             if (ok && (dflags & DE_BAD_TIMESTAMP)) {
                 UINT tsm = dirent_bad_timestamp_mask(ent);
-                if (tsm != 0u)
-                    ok = fix_dir_patch(sect, off, FIX_DPATCH_TIMESTAMP,
-                                       (DWORD)tsm);
+                if (tsm != 0u) {
+                    ok = fix_dir_patch_raw(sect, off, FIX_DPATCH_TIMESTAMP,
+                                           (DWORD)tsm);
+                    if (ok) patched = 1;
+                }
             }
-            if (!ok) warn_str("dpatch");
+            if (!ok)            warn_str("dpatch");
+            else if (patched)   fix_count_applied();
             dirwalk_buffer_dirty(&frame->walker);
         }
 

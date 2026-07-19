@@ -38,7 +38,7 @@ trap 'rm -rf "$WORK"' EXIT
 fstypes=("$@")
 [ ${#fstypes[@]} -eq 0 ] && fstypes=(fat16 fat12 fat32)
 
-scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_lfn_cross badname_cyr lfn_badsum lfn_badsum_cross lfn_badord lfn_badordbit lfn_earlynul lfn_badpad lfn_orphan lfn_overlong badtime badtime_leap fakedir)
+scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_lfn_cross badname_cyr lfn_badsum lfn_badsum_cross lfn_badord lfn_badordbit lfn_earlynul lfn_badpad lfn_orphan lfn_overlong badtime badtime_leap badtime_ntres fakedir)
 modes=("F" "FC")
 
 pass=0
@@ -385,6 +385,31 @@ for fs in "${fstypes[@]}"; do
         fail=$((fail+1)); failures+=("$fs/badtime/fields")
     else
         echo "$tag ok (only the out-of-range fields reset to the epoch)"
+        pass=$((pass+1))
+    fi
+done
+
+# One entry with TWO repairable flags at once (reserved NTRES + bad
+# timestamp) must still count as ONE logical repair. Reproduces a real
+# FAT32 log where this combination produced "found=7 applied=8" --
+# fix_dir_patch_raw not bumping the counter per patch, one
+# fix_count_applied() for the whole group, is what this asserts.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-badtime-ntres.img"
+    out="$WORK/$fs-badtime-ntres.out"
+    tag="[$fs/badtime_ntres]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badtime_ntres >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >"$out" 2>>"$log"
+    if ! grep -q "ntres bad-time\|bad-time ntres" "$out"; then
+        echo "$tag FAIL: entry not flagged with both ntres and bad-time"
+        fail=$((fail+1)); failures+=("$fs/badtime_ntres/detect")
+    elif ! grep -q "Fixes: found=1 applied=1" "$out"; then
+        echo "$tag FAIL: counters are not 1/1 for the combined entry"
+        grep "Fixes:" "$out" | sed 's/^/    /'
+        fail=$((fail+1)); failures+=("$fs/badtime_ntres/count")
+    else
+        echo "$tag ok (two patches on one entry counted as one repair)"
         pass=$((pass+1))
     fi
 done

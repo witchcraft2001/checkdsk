@@ -128,6 +128,13 @@ int  fix_fat_set(vol_t *fs, DWORD clust, DWORD value);
  * g_sect_a is clobbered on every call. */
 int  fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value);
 
+/* Same as fix_dir_patch, but does NOT bump the "applied" counter --
+ * for a caller that issues several patches against ONE logical repair
+ * (e.g. an entry with both a reserved-attribute and a bad-timestamp
+ * flag) and needs to count the whole group once, not once per patch.
+ * The caller calls fix_count_applied() itself after the group succeeds. */
+int  fix_dir_patch_raw(LBA_t sect, WORD off, u8 kind, DWORD value);
+
 /* Rewrite the 11-byte SFN name field at (sect, off) with new_name[11].
  * Touches only bytes 0..10 of the entry. Re-reads the sector into
  * g_sect_a, writes back, bumps the "applied" counter. Returns 1 on
