@@ -47,12 +47,27 @@
 #define DE_LFN_CHAR          0x0400u  /* LFN name holds a forbidden UCS-2
                                           char (0x0000-0x001F control or
                                           the / \ : * ? " < > | set) */
+#define DE_BAD_TIMESTAMP     0x0800u  /* >=1 date/time field out of range;
+                                          see dirent_bad_timestamp_mask */
 
+/* Deliberately excludes DE_NAME_* and DE_BAD_TIMESTAMP: this mask also
+ * gates directory descent, and neither a cosmetic name nor a nonsense
+ * date is evidence that the cluster pointer is untrustworthy. */
 #define DE_ANY_ERROR        (DE_NAME_BAD_CHAR    | DE_ATTR_RESERVED | \
                              DE_VOL_NONZERO      | DE_LFN_BAD       | \
                              DE_CLUST_OOR        | DE_FAT16_HI_CLUST | \
                              DE_DIR_NONZERO_SIZE | DE_NTRES_RSV      | \
                              DE_LFN_CHAR)
+
+/* Which of the five timestamp fields failed range validation. Doubles
+ * as the `value` argument of a FIX_DPATCH_TIMESTAMP patch, so only the
+ * offending fields get reset and a good creation date survives a
+ * garbage access date. */
+#define DE_TS_CRT_TIME       0x01u  /* offset 14..15 */
+#define DE_TS_CRT_DATE       0x02u  /* offset 16..17 */
+#define DE_TS_ACC_DATE       0x04u  /* offset 18..19 */
+#define DE_TS_WRT_TIME       0x08u  /* offset 22..23 */
+#define DE_TS_WRT_DATE       0x10u  /* offset 24..25 */
 
 /* Inspect the 32-byte entry `e` and return a bitmask of DE_* flags.
  * Returns 0 when the entry is clean (or is a deleted slot that we
@@ -79,6 +94,17 @@ void dirent_sanitize_name(const BYTE *e, BYTE *out);
  * recomputes it after rewriting the SFN so a preceding LFN run stays
  * valid instead of being deleted. */
 BYTE dirent_sfn_checksum(const BYTE *e);
+
+/* Bitmask of DE_TS_* for the date/time fields of `e` that are out of
+ * range. 0 when every field is sane. Only meaningful on an SFN entry --
+ * on an LFN slot those offsets hold name characters, so dirent_validate
+ * calls this from the SFN branch only.
+ *
+ * An all-zero date word counts as SANE, not corrupt: CrtDate and
+ * LstAccDate are optional per the FAT spec and a great many writers
+ * leave them zero, so rejecting that would flag most real volumes. A
+ * zero TIME word is a genuine 00:00:00 and needs no special case. */
+UINT dirent_bad_timestamp_mask(const BYTE *e);
 
 /* Non-zero when e is an active, current-format (LDIR_Type == 0) LFN
  * name component. Entries with the LFN attribute but a non-zero type

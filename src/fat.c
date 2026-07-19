@@ -29,6 +29,17 @@
 static DWORD g_free_clusters = 0ul;
 static DWORD g_bad_clusters  = 0ul;
 
+/* Set when Phase 2 found FSInfo's cached free_count disagreeing with
+ * the FAT it just counted. Two consumers: main.c calls
+ * fat_invalidate_fsinfo when this is set even if no other repair ran
+ * (otherwise a volume whose ONLY defect is a stale FSInfo would be
+ * reported and never fixed), and fat_invalidate_fsinfo counts an
+ * "applied" fix only in that case -- when it fires merely as a
+ * side-effect of freeing clusters there is no "found" behind it. */
+static u8 g_fsinfo_stale = 0u;
+
+int fat_fsinfo_stale(void) { return g_fsinfo_stale != 0u; }
+
 DWORD fat_free_clusters(void) { return g_free_clusters; }
 DWORD fat_bad_clusters(void)  { return g_bad_clusters; }
 
@@ -456,6 +467,42 @@ static void check_special_entries(vol_t *fs, int *errs)
 }
 
 #if CHKDSK_FAT32
+/* Cross-check FSInfo's cached free-cluster hint against what Phase 2
+ * just counted from the FAT itself (specs.md: "FSInfo divergence from
+ * the actual free count is flagged"). Non-critical -- DSS recomputes
+ * from a 0xFFFFFFFF marker -- but it is a real, repairable
+ * inconsistency, so it counts as a found issue and drives the exit
+ * code like any other.
+ *
+ * Reads into g_fat_a, not g_sect_a: chain.c caches a FAT sector in the
+ * latter and would hand out these FSInfo bytes as a FAT entry. */
+static void check_fsinfo_free(vol_t *fs, unsigned long actual_free, int *errs)
+{
+    unsigned long stored;
+
+    if (fs->fs_type != FS_FAT32) return;
+    if (fs->fsi_sector == 0ul)   return;
+    if (disk_read(0, g_fat_a, fs->fsi_sector, 1) != RES_OK) return;
+    /* Signature damage is bpb.c's business and already reported there;
+     * without valid signatures the count field means nothing. */
+    if (ld_dword(&g_fat_a[0])   != 0x41615252ul) return;
+    if (ld_dword(&g_fat_a[484]) != 0x61417272ul) return;
+
+    stored = ld_dword(&g_fat_a[488]);
+    if (stored == 0xFFFFFFFFul) return;  /* "unknown" -- honest already */
+    if (stored == actual_free)  return;
+
+    fix_verbose_flush();
+    prt_str("  WARN: FSInfo free_count ");
+    prt_dec(stored);
+    prt_str(" != actual ");
+    prt_dec(actual_free);
+    prt_str(" (needs recalc)\r\n");
+    g_fsinfo_stale = 1u;
+    (*errs)++;
+    fix_count_found();
+}
+
 int fat_invalidate_fsinfo(vol_t *fs)
 {
     unsigned long sig0, sig1;
@@ -477,13 +524,12 @@ int fat_invalidate_fsinfo(vol_t *fs)
      * means "unknown -- recompute on next use" (FAT spec, valid). */
     for (i = 488u; i < 496u; i++) g_fat_a[i] = 0xFFu;
     if (!fix_write(fs->fsi_sector, g_fat_a, 1u)) return 0;
-    /* Deliberately NOT fix_count_applied(). Invalidating FSInfo is a
-     * bookkeeping side-effect of repairs that were already counted --
-     * main.c only calls this when fix_any_applied() is set -- not an
-     * independent repair with its own "found" issue behind it. Counting
-     * it printed the self-contradictory "found=3 applied=4" on FAT32:
-     * more fixes applied than problems found. FAT12/16 have no FSInfo
-     * sector and were never affected. */
+    /* Counted as an applied fix ONLY when check_fsinfo_free actually
+     * found a divergence and counted it as found. Invalidating because
+     * some other repair changed the free count is bookkeeping with no
+     * "found" behind it -- counting that printed the self-contradictory
+     * "found=3 applied=4" on FAT32. FAT12/16 have no FSInfo sector. */
+    if (g_fsinfo_stale) fix_count_applied();
     prt_str("  FSInfo: free_count/next_free invalidated for recalc\r\n");
     return 1;
 }
@@ -492,6 +538,8 @@ int fat_invalidate_fsinfo(vol_t *fs)
 int fat_check(vol_t *fs)
 {
     int   errs = 0;
+
+    g_fsinfo_stale = 0u;   /* _DATA is not zeroed at load */
     int   rc   = 0;
     cnt_t c;
 
@@ -528,6 +576,10 @@ int fat_check(vol_t *fs)
 
     g_free_clusters = c.free_n;
     g_bad_clusters  = c.bad_n;
+
+#if CHKDSK_FAT32
+    check_fsinfo_free(fs, c.free_n, &errs);
+#endif
 
     prt_str("  free=");
     prt_dec(c.free_n);

@@ -108,6 +108,9 @@ int  fix_any_incomplete(void);
 #define FIX_DPATCH_ATTR_MASK     3u  /* attr (off+11) &= 0x3F (drop reserved) */
 #define FIX_DPATCH_NTRES_FIX     4u  /* NTRES (off+12) &= 0x18; CrtTen=0 */
 #define FIX_DPATCH_HI_CLUST_ZERO 5u  /* zero FstClusHI on FAT12/16 */
+#define FIX_DPATCH_TIMESTAMP     6u  /* reset the date/time fields named
+                                        by a DE_TS_* mask in `value` to
+                                        the FAT epoch 1980-01-01 00:00 */
 
 /* Write `value` (next-cluster, EOC, BAD, or 0=free) to the FAT entry
  * for `clust`. Mirrors into FAT 2 if n_fats == 2. Reads the FAT sector

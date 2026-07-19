@@ -63,7 +63,11 @@ WHAT EACH PHASE DOES
     Phase 2 also detects mismatching sectors. The FAT[0] media
     descriptor is cross-checked against the BPB; FAT[1] is checked for
     a valid EOC marker, and on FAT16/32 also for the clean-shutdown
-    and hard-error status bits.
+    and hard-error status bits. On FAT32 the free-cluster count cached
+    in FSInfo is compared against the count taken from the FAT itself;
+    a disagreement is reported and, under /F, FSInfo is marked for
+    recalculation. A cached value of "unknown" is legitimate and is not
+    reported.
 
   Phase 3 -- directory walk and chain check
     Recursively walks every directory starting at the root. Each entry
@@ -72,6 +76,9 @@ WHAT EACH PHASE DOES
       * SFN character set, lowercase, leading-space, attribute bits,
         directory-vs-file consistency, first-cluster bounds, FAT12/16
         high-cluster word, dir-size requirement.
+      * Date and time fields: month, day (leap years included), hour,
+        minute and second ranges on the creation, write and last-access
+        stamps. An all-zero date means "not set" and is accepted.
       * "." / ".." cluster pointers (must equal own / parent cluster).
       * Current-format LFN (long name) groups: slot order and bounds,
         NUL / 0xFFFF padding, one consistent checksum across the group,
@@ -135,6 +142,16 @@ issue noticed regardless of /F.
     chain is linked into a FILE####.CHK entry in the root directory
     so its content can be recovered.
 
+  Out-of-range date / time fields
+    Each offending field is reset to the FAT epoch, 1980-01-01
+    00:00:00. Only the fields that actually failed validation are
+    rewritten, so a sound creation date survives a corrupt
+    last-access date.
+
+  FSInfo free-cluster count out of step with the FAT (FAT32)
+    The cached count and next-free hint are marked "unknown" so DSS
+    recalculates them on the next mount.
+
   Invalid SFN characters, lowercase letters, leading space
     The 8.3 name is sanitized in place: forbidden bytes become '_',
     lowercase ASCII and lowercase CP866 Cyrillic are folded to upper
@@ -153,6 +170,23 @@ issue noticed regardless of /F.
     cluster boundaries. The long name is lost, but the 8.3 name behind
     it stays intact and the file remains fully accessible. An orphaned
     group with no short name behind it is deleted as well.
+
+
+A REPAIR RUN MAY NEED A SECOND PASS
+-----------------------------------
+
+  Some repairs create findings the same run cannot report. /C writes
+  FILE####.CHK entries after the directory walk is over; truncating an
+  over-long chain orphans its tail; and an entry deleted during the
+  directory walk leaves a cluster chain that the lost-cluster sweep of
+  that same run still sees as in use. None of this is damage -- it is
+  the consequence of the repair that was just applied.
+
+  That is what the closing "Re-run chkdsk" line means. Keep running
+  with /F until a pass reports no fixes; each pass strictly reduces
+  what is left, so this converges quickly (two or three passes at
+  worst). A final read-only run exiting with code 0 is the proof that
+  the volume is clean.
 
 
 WHAT IS NOT REPAIRED

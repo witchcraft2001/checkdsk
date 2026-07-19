@@ -112,6 +112,51 @@ int dirent_is_current_lfn(const BYTE *e)
 #define ld_dword_le(p) vol_ld_d(p)
 #define ld_word_le(p)  vol_ld_w(p)
 
+/* FAT packed date: bits 15-9 year-1980, 8-5 month, 4-0 day.
+ * FAT packed time: bits 15-11 hour, 10-5 minute, 4-0 seconds/2. */
+static int date_ok(WORD d)
+{
+    static const BYTE dim[12] =
+        { 31u, 28u, 31u, 30u, 31u, 30u, 31u, 31u, 30u, 31u, 30u, 31u };
+    UINT m, day, lim;
+
+    if (d == 0u) return 1;               /* "not set" -- see dirent.h */
+
+    m   = (UINT)((d >> 5) & 0x0Fu);
+    day = (UINT)(d & 0x1Fu);
+    if (m == 0u || m > 12u) return 0;
+
+    lim = (UINT)dim[m - 1u];
+    if (m == 2u) {
+        /* The 7-bit year field spans 1980..2107, so 2100 is the only
+         * century year it can express -- which lets the /4 //100 //400
+         * rule collapse to one extra comparison and keeps 16-bit modulo
+         * (a called routine on z80) out of the entry-validation path. */
+        UINT y = 1980u + (UINT)(d >> 9);
+        if ((y & 3u) == 0u && y != 2100u) lim = 29u;
+    }
+    return (day >= 1u && day <= lim);
+}
+
+static int time_ok(WORD t)
+{
+    if ((UINT)(t >> 11)          > 23u) return 0;
+    if ((UINT)((t >> 5) & 0x3Fu) > 59u) return 0;
+    if ((UINT)(t & 0x1Fu)        > 29u) return 0;   /* seconds/2 */
+    return 1;
+}
+
+UINT dirent_bad_timestamp_mask(const BYTE *e)
+{
+    UINT m = 0u;
+    if (!time_ok(ld_word_le(&e[14]))) m |= DE_TS_CRT_TIME;
+    if (!date_ok(ld_word_le(&e[16]))) m |= DE_TS_CRT_DATE;
+    if (!date_ok(ld_word_le(&e[18]))) m |= DE_TS_ACC_DATE;
+    if (!time_ok(ld_word_le(&e[22]))) m |= DE_TS_WRT_TIME;
+    if (!date_ok(ld_word_le(&e[24]))) m |= DE_TS_WRT_DATE;
+    return m;
+}
+
 UINT dirent_validate(vol_t *fs, const BYTE *e)
 {
     UINT  flags = 0u;
@@ -202,14 +247,16 @@ UINT dirent_validate(vol_t *fs, const BYTE *e)
      * are defined; the rest must be zero. CrtTimeTenth (0x0D) ranges
      * 0..199 (tens of milliseconds within a 2-second wrt_time slot).
      * Out-of-range values are RTC corruption or random garbage; both
-     * map to a single repair (zero NTRES non-case bits, zero tenths).
-     *
-     * Note: full timestamp range-validation (5 fields per entry) was
-     * dropped in favour of /F /C and FSInfo recalc -- bad timestamps
-     * affect display only, never disk integrity, while the dropped
-     * code freed ~280 B of _CODE that the FAT32 FSInfo updater needs. */
+     * map to a single repair (zero NTRES non-case bits, zero tenths). */
     if ((e[12] & ~0x18u) != 0u) flags |= DE_NTRES_RSV;
     if (e[13] > 199u)           flags |= DE_NTRES_RSV;
+
+    /* Timestamp range validation. Restored 2026-07-19 after having been
+     * dropped once for _CODE budget (the note that used to sit here
+     * described that removal); the win0 extended layout has the room.
+     * Checked here, in the SFN branch, because offsets 14..25 hold name
+     * characters on an LFN slot. */
+    if (dirent_bad_timestamp_mask(e) != 0u) flags |= DE_BAD_TIMESTAMP;
 
     {
         BYTE *fc = (BYTE *)&first_clust;
@@ -272,7 +319,8 @@ void dirent_flags_print(UINT flags)
         { DE_CLUST_OOR,        " clust-oor" },
         { DE_FAT16_HI_CLUST,   " fat16-hi" },
         { DE_NTRES_RSV,        " ntres" },
-        { DE_LFN_CHAR,         " lfn-char" }
+        { DE_LFN_CHAR,         " lfn-char" },
+        { DE_BAD_TIMESTAMP,    " bad-time" }
     };
     UINT i;
     if (flags == 0u) return;

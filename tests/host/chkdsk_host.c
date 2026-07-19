@@ -99,7 +99,9 @@ int main(int argc, char **argv)
     scan_print_report(&g_fs, fat_free_clusters(), fat_bad_clusters());
 
 #if CHKDSK_FAT32
-    if (fix_any_applied()) (void)fat_invalidate_fsinfo(&g_fs);
+    /* Mirrors main.c's dispatch() -- see the note there. */
+    if (fix_any_applied() || fat_fsinfo_stale())
+        (void)fat_invalidate_fsinfo(&g_fs);
 #endif
     vol_unmount(&g_fs);
 

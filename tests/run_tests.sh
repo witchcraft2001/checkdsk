@@ -38,7 +38,7 @@ trap 'rm -rf "$WORK"' EXIT
 fstypes=("$@")
 [ ${#fstypes[@]} -eq 0 ] && fstypes=(fat16 fat12 fat32)
 
-scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_lfn_cross badname_cyr lfn_badsum lfn_badsum_cross lfn_badord lfn_badordbit lfn_earlynul lfn_badpad lfn_orphan lfn_overlong)
+scenarios=(orphan selfloop cycle2 cycle3tail garb desync broken excess cross userdisk chkmess badname badname_lfn badname_lfn_cross badname_cyr lfn_badsum lfn_badsum_cross lfn_badord lfn_badordbit lfn_earlynul lfn_badpad lfn_orphan lfn_overlong badtime badtime_leap fakedir)
 modes=("F" "FC")
 
 pass=0
@@ -360,6 +360,148 @@ for fs in "${fstypes[@]}"; do
         pass=$((pass+1))
     fi
 done
+
+# Bad-timestamp repair granularity. The scenario matrix already proves
+# detect -> repair -> clean; what it cannot show is that ONLY the
+# out-of-range fields are rewritten. badtime plants a valid creation
+# timestamp next to a corrupt write timestamp, so a blanket "reset all
+# five fields" implementation fails here while still passing the matrix.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-badtime.img"
+    out="$WORK/$fs-badtime.out"
+    tag="[$fs/badtime]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badtime >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >"$out" 2>>"$log"
+    ts=$(python3 "$MKIMG" ts "$img" "FILE1   TXT")
+    want="crt_time=63cf crt_date=50cf acc_date=0000 wrt_time=0000 wrt_date=0021"
+    if ! grep -q "bad-time" "$out"; then
+        echo "$tag FAIL: out-of-range timestamp not reported"
+        fail=$((fail+1)); failures+=("$fs/badtime/detect")
+    elif [ "$ts" != "$want" ]; then
+        echo "$tag FAIL: fields after repair"
+        echo "    got:  $ts"
+        echo "    want: $want"
+        fail=$((fail+1)); failures+=("$fs/badtime/fields")
+    else
+        echo "$tag ok (only the out-of-range fields reset to the epoch)"
+        pass=$((pass+1))
+    fi
+done
+
+# Leap-day boundary: Feb 29 2021 is corrupt, Feb 29 2020 is not. A
+# "day <= 31" check passes the matrix but fails here, and a check that
+# forgets leap years destroys a legitimate date.
+for fs in "${fstypes[@]}"; do
+    img="$WORK/$fs-btleap.img"
+    out="$WORK/$fs-btleap.out"
+    tag="[$fs/badtime_leap]"
+    python3 "$MKIMG" build "$img" "$fs" >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" badtime_leap >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >"$out" 2>>"$log"
+    n=$(grep -c "bad-time" "$out")
+    keep=$(python3 "$MKIMG" ts "$img" "README  TXT")
+    wantk="crt_time=0000 crt_date=0000 acc_date=0000 wrt_time=6000 wrt_date=505d"
+    if [ "$n" != "1" ]; then
+        echo "$tag FAIL: $n entries flagged bad-time, want exactly 1"
+        fail=$((fail+1)); failures+=("$fs/badtime_leap/count")
+    elif [ "$keep" != "$wantk" ]; then
+        echo "$tag FAIL: legitimate 2020-02-29 was altered"
+        echo "    got:  $keep"
+        echo "    want: $wantk"
+        fail=$((fail+1)); failures+=("$fs/badtime_leap/keep")
+    else
+        echo "$tag ok (2021-02-29 fixed, 2020-02-29 preserved)"
+        pass=$((pass+1))
+    fi
+done
+
+# A file whose attribute byte gained ATTR_DIR gets deleted in Phase 3.
+# Two properties the scenario matrix cannot show on its own:
+#   1. the end-of-run report must not count an entry this same run just
+#      deleted -- its directory figure has to match a clean volume's;
+#   2. the orphaned chain surfaces as lost only on the NEXT pass, since
+#      walk_chain already claimed those clusters in this pass's bitmap.
+# Observed on real FAT16 hardware (three such entries under XCOPY*/ZCOPY)
+# before either was handled.
+for fs in "${fstypes[@]}"; do
+    tag="[$fs/fakedir]"
+    ref="$WORK/$fs-fakedir-ref.img"
+    img="$WORK/$fs-fakedir.img"
+    o0="$WORK/$fs-fd0.out"; o1="$WORK/$fs-fd1.out"
+    o2="$WORK/$fs-fd2.out"; o3="$WORK/$fs-fd3.out"
+
+    python3 "$MKIMG" build "$ref" "$fs" >"$log" 2>&1
+    "$HOST" "$ref" >"$o0" 2>>"$log"
+    want=$(grep 'bytes in .* directories' "$o0" | tr -d '\r')
+
+    python3 "$MKIMG" build "$img" "$fs" >>"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" fakedir >>"$log" 2>&1
+    "$HOST" "$img" /F /Y >"$o1" 2>>"$log"
+    got=$(grep 'bytes in .* directories' "$o1" | tr -d '\r')
+    "$HOST" "$img" /F /Y >"$o2" 2>>"$log"
+    "$HOST" "$img" >"$o3" 2>>"$log"; rc=$?
+
+    if ! grep -q "dir-size" "$o1"; then
+        echo "$tag FAIL: ATTR_DIR on a file was not reported"
+        fail=$((fail+1)); failures+=("$fs/fakedir/detect")
+    elif [ "$got" != "$want" ]; then
+        echo "$tag FAIL: report counted an entry this run deleted"
+        echo "    got:  $got"
+        echo "    want: $want"
+        fail=$((fail+1)); failures+=("$fs/fakedir/counters")
+    elif ! grep -q "lost cluster" "$o2"; then
+        echo "$tag FAIL: orphaned chain not reported as lost on pass 2"
+        fail=$((fail+1)); failures+=("$fs/fakedir/orphan")
+    elif [ "$rc" != "0" ]; then
+        echo "$tag FAIL: pass 3 exit $rc, want 0 (converged)"
+        fail=$((fail+1)); failures+=("$fs/fakedir/converge")
+    else
+        echo "$tag ok (uncounted after delete, orphan on pass 2, converged)"
+        pass=$((pass+1))
+    fi
+done
+
+# FSInfo free_count cross-check -- FAT32 only. Also the one case where a
+# stale FSInfo is the ONLY defect, which is what makes it a test of the
+# repair gate: nothing else gets applied, so a gate keyed purely on
+# fix_any_applied() would report the issue and never fix it.
+if printf '%s\n' "${fstypes[@]}" | grep -qx fat32 >/dev/null; then
+    img="$WORK/fat32-fsinfo.img"
+    out="$WORK/fat32-fsinfo.out"
+    tag="[fat32/fsinfo]"
+    python3 "$MKIMG" build "$img" fat32 >"$log" 2>&1
+    python3 "$MKIMG" corrupt "$img" fsinfo >>"$log" 2>&1
+
+    "$HOST" "$img" >"$out" 2>>"$log"; rc=$?
+    if ! grep -q "FSInfo free_count" "$out"; then
+        echo "$tag FAIL: diverged FSInfo free_count not reported"
+        fail=$((fail+1)); failures+=("fat32/fsinfo/detect")
+    elif [ "$rc" != "1" ]; then
+        echo "$tag FAIL: read-only exit $rc, want 1 (found, unfixed)"
+        fail=$((fail+1)); failures+=("fat32/fsinfo/rc_ro")
+    else
+        "$HOST" "$img" /F /Y >"$out" 2>>"$log"; rc=$?
+        if ! grep -q "Fixes: found=1 applied=1" "$out"; then
+            echo "$tag FAIL: counters are not 1/1 under /F"
+            grep "Fixes:" "$out" | sed 's/^/    /'
+            fail=$((fail+1)); failures+=("fat32/fsinfo/count")
+        elif [ "$rc" != "2" ]; then
+            echo "$tag FAIL: /F exit $rc, want 2 (all fixed)"
+            fail=$((fail+1)); failures+=("fat32/fsinfo/rc_fix")
+        else
+            "$HOST" "$img" >"$out" 2>>"$log"; rc=$?
+            if [ "$rc" != "0" ]; then
+                echo "$tag FAIL: re-scan exit $rc, want 0 -- 0xFFFFFFFF"
+                echo "    is a legitimate 'unknown' and must not re-report"
+                fail=$((fail+1)); failures+=("fat32/fsinfo/rescan")
+            else
+                echo "$tag ok (detected, invalidated for recalc, then clean)"
+                pass=$((pass+1))
+            fi
+        fi
+    fi
+fi
 
 # Each case runs under three I/O models, so a repair must be correct
 # against all of them:

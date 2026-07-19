@@ -591,6 +591,43 @@ def corrupt(img, g, scenario):
         # name and would false-fail once this byte folds.
         off, _ = find_file_chain(img, g, "README  TXT")
         img[off + 8] = 0xA0
+    elif scenario == "fakedir":
+        # FILE1.TXT keeps its data and size but gains ATTR_DIR, the
+        # shape seen on a real FAT16 volume (three such entries under
+        # XCOPY*/ZCOPY). It has no "." / ".." so has_dot == 0 and /F
+        # marks it deleted -- after which the end-of-run report must no
+        # longer count it among the directories. Its chain stays claimed
+        # in this run's bitmap, so Phase 4 only reports it as lost on a
+        # SECOND pass; that is expected, not a defect.
+        off, _ = find_file_chain(img, g, "FILE1   TXT")
+        img[off + 11] |= 0x10
+    elif scenario == "badtime":
+        # specs.md's "2099-13-32 25:61:62". Day 32 does not fit the 5-bit
+        # day field at all, so the encodable equivalent is day 31 with the
+        # out-of-range month 13. A VALID creation timestamp is planted
+        # alongside the corrupt write timestamp: the repair resets only
+        # the offending fields, so this pair has to come back untouched.
+        off, _ = find_file_chain(img, g, "FILE1   TXT")
+        struct.pack_into("<H", img, off + 14, (12 << 11) | (30 << 5) | 15)
+        struct.pack_into("<H", img, off + 16, (40 << 9) | (6 << 5) | 15)
+        struct.pack_into("<H", img, off + 22, (25 << 11) | (61 << 5) | 31)
+        struct.pack_into("<H", img, off + 24, (119 << 9) | (13 << 5) | 31)
+    elif scenario == "badtime_leap":
+        # Feb 29 is corrupt in 2021 and correct in 2020. Both are planted
+        # so a run must flag exactly one -- the guard against a lazy
+        # "day <= 31" check that would either miss the first or destroy
+        # the second.
+        off, _ = find_file_chain(img, g, "FILE1   TXT")
+        struct.pack_into("<H", img, off + 24, (41 << 9) | (2 << 5) | 29)
+        off, _ = find_file_chain(img, g, "README  TXT")
+        struct.pack_into("<H", img, off + 24, (40 << 9) | (2 << 5) | 29)
+    elif scenario == "fsinfo":
+        # FAT32 only: FSInfo caches a free_count that contradicts the FAT.
+        # Deliberately not 0xFFFFFFFF -- that value means "unknown" and is
+        # a legitimate state that must NOT be reported.
+        if g.type != 32:
+            raise SystemExit("scenario 'fsinfo' is FAT32-only")
+        struct.pack_into("<I", img, SEC + 488, 1)
     elif scenario == "badname_collide":
         # A lowercase twin of the existing FILE2 entry: sanitizing it
         # (uppercase) would exactly collide with FILE2's own name. The
@@ -816,6 +853,20 @@ def main():
         img, g = load(path)
         off, _ = find_file_chain(img, g, sys.argv[3])
         print(off)
+        return 0
+    if cmd == "ts":
+        # args: ts <name83> -- print the five timestamp words as hex in
+        # dirent order, so a shell test can assert which fields a repair
+        # rewrote and which it left alone.
+        img, g = load(path)
+        off, _ = find_file_chain(img, g, sys.argv[3])
+        print("crt_time=%04x crt_date=%04x acc_date=%04x "
+              "wrt_time=%04x wrt_date=%04x"
+              % (struct.unpack_from("<H", img, off + 14)[0],
+                 struct.unpack_from("<H", img, off + 16)[0],
+                 struct.unpack_from("<H", img, off + 18)[0],
+                 struct.unpack_from("<H", img, off + 22)[0],
+                 struct.unpack_from("<H", img, off + 24)[0]))
         return 0
     if cmd == "checkbyte":
         # args: path abs-offset expected-hex-byte

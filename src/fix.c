@@ -11,6 +11,7 @@
 #include "sectbuf.h"
 #include "chain.h"
 #include "prt.h"
+#include "dirent.h"   /* DE_TS_* field bits consumed by FIX_DPATCH_TIMESTAMP */
 #include "fix.h"
 
 static u8    g_fix_enabled = 0u;
@@ -217,6 +218,26 @@ int fix_dir_patch(LBA_t sect, WORD off, u8 kind, DWORD value)
         g_sect_a[off + 20u] = 0u;
         g_sect_a[off + 21u] = 0u;
         break;
+    case FIX_DPATCH_TIMESTAMP: {
+        /* Epoch is 1980-01-01 00:00:00: time word 0x0000, date word
+         * (year 0 << 9) | (month 1 << 5) | day 1 == 0x0021. Only the
+         * fields flagged in `value` are touched -- a sane creation
+         * date must survive a garbage last-access date. */
+        static const struct { u8 mask; u8 off; u8 lo; u8 hi; } ts[5] = {
+            { DE_TS_CRT_TIME, 14u, 0x00u, 0x00u },
+            { DE_TS_CRT_DATE, 16u, 0x21u, 0x00u },
+            { DE_TS_ACC_DATE, 18u, 0x21u, 0x00u },
+            { DE_TS_WRT_TIME, 22u, 0x00u, 0x00u },
+            { DE_TS_WRT_DATE, 24u, 0x21u, 0x00u }
+        };
+        UINT i;
+        for (i = 0u; i < 5u; i++) {
+            if ((vb[0] & ts[i].mask) == 0u) continue;
+            g_sect_a[off + ts[i].off]        = ts[i].lo;
+            g_sect_a[off + ts[i].off + 1u]   = ts[i].hi;
+        }
+        break;
+    }
     default: /* FIX_DPATCH_SIZE */
         g_sect_a[off + 28u] = vb[0];
         g_sect_a[off + 29u] = vb[1];
@@ -401,12 +422,16 @@ void fix_print_summary(void)
         prt_str(" applied=");
         prt_dec((unsigned long)g_fix_applied);
         prt_nl();
-        /* A repair can introduce new entries the walker never saw on
-         * this pass (e.g. /CONVERT creates FILE####.CHK in the root,
-         * EXCESS truncate orphans the trailing chain). Encourage the
-         * user to rerun so those follow-on findings get reported. */
+        /* A repair can introduce findings this pass could not report:
+         * /CONVERT creates FILE####.CHK entries the walker never saw,
+         * an EXCESS truncate orphans the trailing chain, and an entry
+         * deleted in Phase 3 leaves a chain that Phase 4 still sees as
+         * claimed (see the DE_DIR_NONZERO_SIZE note in scan.c) -- that
+         * one only surfaces as lost on the next run. So do NOT promise
+         * a clean volume here; say what a re-run is actually for. */
         if (g_fix_applied != 0ul) {
-            prt_str("Re-run chkdsk to verify the volume is now clean.\r\n");
+            prt_str("Re-run chkdsk: repairs can expose further "
+                    "findings.\r\n");
         }
     } else {
         prt_str("Found ");

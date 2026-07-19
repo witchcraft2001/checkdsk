@@ -702,7 +702,8 @@ static int step(vol_t *fs, BYTE *depth)
          * repaired issue -- otherwise a dry run would report "clean"
          * on an entry /F is about to touch. */
         UINT de_err = dflags & (DE_ANY_ERROR | DE_NAME_LOWERCASE
-                                             | DE_NAME_LEAD_SPACE);
+                                             | DE_NAME_LEAD_SPACE
+                                             | DE_BAD_TIMESTAMP);
         if (de_err || cflags) {
             print_flagged(*depth, ent);
             prt_str(" *");
@@ -718,9 +719,18 @@ static int step(vol_t *fs, BYTE *depth)
          *   otherwise    -- a file whose attribute byte got corrupted to
          *                   include ATTR_DIR; mark the entry deleted so
          *                   the walker can't be tricked into descending
-         *                   into user data. The cluster chain becomes
-         *                   orphaned and is later recovered by the
-         *                   Phase 4 lost-cluster sweep. */
+         *                   into user data.
+         *
+         * The deleted entry's cluster chain is NOT recovered by Phase 4
+         * of this run: walk_chain above already claimed it in the
+         * bitmap, so the sweep sees those clusters as in use. It becomes
+         * visible as a lost chain on the NEXT pass, once nothing
+         * references it any more. A single-pass recovery is possible but
+         * would have to clear exactly the clusters this walk_chain
+         * claimed first (a naive whole-chain reset would hand Phase 4
+         * clusters a cross-linked live file still uses), or rebuild the
+         * bitmap after the repairs -- and bitmap.h currently offers no
+         * per-bit clear at all. */
         if (dflags & DE_DIR_NONZERO_SIZE) {
             LBA_t sect; WORD off;
             int   ok;
@@ -732,6 +742,23 @@ static int step(vol_t *fs, BYTE *depth)
                 if (fix_enabled()) {
                     /* Sector reload clobbered g_sect_a -- walker stale. */
                     dirwalk_buffer_dirty(&frame->walker);
+
+                    /* The entry was counted as a live directory a few
+                     * lines above, before we knew it was about to go.
+                     * Back that out so the end-of-run report describes
+                     * the volume as it stands after the repair rather
+                     * than as it was found. Only the report counters:
+                     * `entries` is a census of every slot walked, and
+                     * Phase 3's `dirs` counts directories actually
+                     * descended -- this entry was never descended into,
+                     * so neither is affected. DE_DIR_NONZERO_SIZE
+                     * implies ATTR_DIR without ATTR_VOLID, which is
+                     * exactly the condition under which the dir
+                     * counters were bumped. */
+                    if (has_dot != 1) {
+                        t->dir_entries--;
+                        t->dir_clusters -= chain_len;
+                    }
                 }
             } else {
                 warn_str("dir-corrupt");
@@ -746,7 +773,7 @@ static int step(vol_t *fs, BYTE *depth)
          * (2 entries * 3 B + per-iter loop overhead) outweighed the
          * common-prefix savings at three masks. */
         if (fix_enabled() && (dflags & (DE_ATTR_RESERVED | DE_NTRES_RSV
-                                      | DE_FAT16_HI_CLUST))
+                                      | DE_FAT16_HI_CLUST | DE_BAD_TIMESTAMP))
             && (ent[11] & 0x3Fu) != ATTR_LFN) {
             LBA_t sect; WORD off;
             int   ok = 1;
@@ -757,6 +784,17 @@ static int step(vol_t *fs, BYTE *depth)
                 ok = fix_dir_patch(sect, off, FIX_DPATCH_NTRES_FIX, 0ul);
             if (ok && (dflags & DE_FAT16_HI_CLUST))
                 ok = fix_dir_patch(sect, off, FIX_DPATCH_HI_CLUST_ZERO, 0ul);
+            /* Recomputed rather than carried down from the validate
+             * call: the mask says WHICH of the five fields to reset,
+             * and dflags only has room for the one summary bit. The
+             * entry bytes are unchanged since validation -- every patch
+             * above touches attr/NTRES/cluster, never a date field. */
+            if (ok && (dflags & DE_BAD_TIMESTAMP)) {
+                UINT tsm = dirent_bad_timestamp_mask(ent);
+                if (tsm != 0u)
+                    ok = fix_dir_patch(sect, off, FIX_DPATCH_TIMESTAMP,
+                                       (DWORD)tsm);
+            }
             if (!ok) warn_str("dpatch");
             dirwalk_buffer_dirty(&frame->walker);
         }

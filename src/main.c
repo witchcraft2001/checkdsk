@@ -144,7 +144,11 @@ static u8 dispatch(char letter)
      * Done after all phase-2/4 writes so the recalc reflects the
      * post-fix state. Gated on fix_any_applied so a clean /F run
      * doesn't rewrite an already-correct FSInfo sector. */
-    if (fix_any_applied()) (void)fat_invalidate_fsinfo(&g_fs);
+    /* fat_fsinfo_stale() matters on its own: a volume whose only defect
+     * is a diverged FSInfo has nothing else to apply, and gating purely
+     * on fix_any_applied() would report the issue and never repair it. */
+    if (fix_any_applied() || fat_fsinfo_stale())
+        (void)fat_invalidate_fsinfo(&g_fs);
 #endif
     vol_unmount(&g_fs);
 

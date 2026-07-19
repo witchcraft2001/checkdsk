@@ -41,6 +41,12 @@ DWORD fat_bad_clusters(void);
  * silently if FSInfo signatures are bad or the volume has no FSInfo
  * sector. Returns 1 on success or skip, 0 on I/O error. */
 int fat_invalidate_fsinfo(vol_t *fs);
+
+/* Non-zero when Phase 2 saw FSInfo's cached free_count disagree with
+ * the actual FAT contents. Callers must invoke fat_invalidate_fsinfo
+ * when this is set even if nothing else was repaired -- it is the one
+ * case where a stale FSInfo is itself the reported issue. */
+int fat_fsinfo_stale(void);
 #endif
 
 #endif /* CHKDSK_FAT_H */
