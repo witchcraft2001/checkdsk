@@ -1,6 +1,6 @@
 # checkdsk — FAT filesystem checker for ZX Sprinter / Estex DSS
 
-Copyright © 2026 Dmitry Mikhalchenkov, Sprinter Team. Licensed under GPLv3 (see [`LICENSE`](LICENSE)).
+Copyright © 2026 Dmitry Mikhalchenkov, Sprinter Team. Licensed under GPLv3 (see [`LICENSE`](LICENSE)). FidoNet: 2:5030/1997.10.
 
 A native chkdsk utility for the ZX Sprinter computer (Z80, 7/21 MHz) running the Estex DSS operating system. Validates and repairs FAT12, FAT16 and FAT32 volumes mounted from floppies, IDE / CompactFlash / SD partitions, and similar block devices addressable through the DSS BIOS.
 

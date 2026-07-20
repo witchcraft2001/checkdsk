@@ -1,19 +1,23 @@
+        d8b                     d8b             d8b   d8,         d8b       
+        ?88                     ?88             88P  `8P          ?88       
+         88b                     88b           d88                 88b      
+ d8888b  888888b  d8888b d8888b  888  d88' d888888    88b .d888b,  888  d88'
+d8P' `P  88P `?8bd8b_,dPd8P' `P  888bd8P' d8P' ?88    88P ?8b,     888bd8P' 
+88b     d88   88P88b    88b     d88888b   88b  ,88b  d88    `?8b  d88888b   
+`?888P'd88'   88b`?888P'`?888P'd88' `?88b,`?88P'`88bd88' `?888P' d88' `?88b,
+
 CHKDSK for ZX Sprinter / Estex DSS
 ==================================
 
-(c) 2026 Dmitry Mikhalchenkov, Sprinter Team. Licensed under GPLv3.
+(c) 2026 Dmitry Mikhalchenkov, Sprinter Team. FidoNet: 2:5030/1997.10.
+Licensed under GPLv3.
 
 A FAT filesystem checker and repair tool for floppies, IDE / CF / SD
 partitions, and similar media accessible through the DSS BIOS.
 
-
-WHICH BINARY TO RUN
--------------------
-
 A single binary, CHKDSK.EXE, covers FAT12, FAT16 and FAT32 for
 floppies and IDE / CF / SD partitions alike. The FAT type is detected
-at runtime from the BPB -- there is nothing to choose. (Earlier
-releases shipped a separate CHKDSK12.EXE for FAT12; that split is gone.)
+at runtime from the BPB.
 
 
 COMMAND LINE
@@ -208,7 +212,8 @@ WHAT IS NOT REPAIRED
 OUTPUT EXAMPLE
 --------------
 
-  checkdsk 0.1.20260501 for Sprinter DSS
+  checkdsk 0.1.32 (19072026)
+  by Dmitry Mikhalchenkov
   Mode: read-only
   Phase 1: boot sector and BPB
     Type: FAT16, clusters: 32761

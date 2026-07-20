@@ -234,6 +234,11 @@ static int check_fat_wide(vol_t *fs, int *errs, cnt_t *c, int is_fat32)
     sec_off = 0;
     while (sec_off < fs->fsize && entry_n < entries_total) {
         fix_verbose_tick();
+        if (fix_poll_abort()) {
+            fat_warn("aborted");
+            diskio_batch_close();
+            return -1;
+        }
         DWORD remaining = fs->fsize - sec_off;
         u8    batch     = (remaining > BATCH_SECTORS_PER_PAGE)
                           ? (u8)BATCH_SECTORS_PER_PAGE
@@ -342,6 +347,13 @@ static int check_fat12(vol_t *fs, int *errs, cnt_t *c)
 
     /* Pass 1: walk FAT 1 entries. */
     while (entry_n < entries_total) {
+        if ((entry_n & 0x7Ful) == 0ul) {
+            fix_verbose_tick();
+            if (fix_poll_abort()) {
+                fat_warn("aborted");
+                return -1;
+            }
+        }
         u8 b0 = fat12_read_byte(byte_pos);
         u8 b1 = fat12_read_byte(byte_pos + 1u);
         u8 b2 = fat12_read_byte(byte_pos + 2u);

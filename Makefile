@@ -34,7 +34,19 @@
 #
 # Common knobs (override on the command line):
 #   SDK_DIR    SDCC SDK root (../sdcc45-sprinter-sdk/ by default).
-#   VERSION    Version string baked into the banner.
+#   VERSION    X.Y.Z version string baked into the banner. Each part
+#              is an 8-bit field (0-255) per the project's versioning
+#              scheme -- do not put a date in here (that broke Z, which
+#              used to hold YYYYMMDD). Defaults to 0.1.$(BUILD_NUM).
+#   BUILD_NUM  The Z part of VERSION: a build counter, 0-255. Defaults
+#              to the number of commits since the most recent v<X.Y> git
+#              tag (so it resets at each major/minor bump instead of
+#              growing across the whole project history -- see the
+#              comment above its definition below); override for a
+#              manual build number.
+#   BUILD_DATE Human-readable build date shown in the banner next to
+#              VERSION, e.g. "checkdsk 0.1.3 (19072026)". Defaults to
+#              today (DDMMYYYY). Informational only, not part of VERSION.
 #   LOG        1 = enable internal logging (default 0).
 #   WIN0_WINRT / WIN0_DATA  raise/lower the WIN2 reserve to trade code
 #                           headroom against stack size.
@@ -43,9 +55,23 @@
 APP        = chkdsk
 SRCS       = main.c cmdline.c diskio_dss.c diskio_batch.c sectbuf.c prt.c volume.c mount.c summary.c bpb.c fat.c chain.c bitmap.c dirwalk.c dirent.c scan.c fix.c
 
-SDK_DIR   ?= ../sdcc45-sprinter-sdk/
-VERSION   ?= 0.1.$(shell date +%Y%m%d)
-LOG       ?= 0
+SDK_DIR    ?= ../sdcc45-sprinter-sdk/
+
+# Build number (VERSION's Z part): commits since the most recent v<X.Y>
+# git tag, so it resets at each major/minor bump instead of growing
+# without bound across the whole project history -- still wrapped into
+# the 8-bit field the versioning scheme requires, as a defensive
+# fallback. To activate the reset, tag the commit where VERSION's X.Y
+# changes, e.g.:
+#   git tag v0.2
+# Until such a tag exists, this falls back to the full commit count
+# (today's behavior). Falls back to 1 outside a git checkout.
+LAST_TAG    := $(shell git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*' 2>/dev/null)
+GIT_COMMITS := $(shell if [ -n "$(LAST_TAG)" ]; then git rev-list --count $(LAST_TAG)..HEAD 2>/dev/null; else git rev-list --count HEAD 2>/dev/null; fi)
+BUILD_NUM   ?= $(shell if [ -n "$(GIT_COMMITS)" ]; then echo $$(( $(GIT_COMMITS) % 256 )); else echo 1; fi)
+BUILD_DATE  ?= $(shell date +%d%m%Y)
+VERSION     ?= 0.1.$(BUILD_NUM)
+LOG         ?= 0
 
 SDCC       ?= sdcc
 SDASZ80    ?= sdasz80
@@ -67,6 +93,7 @@ WIN0_WINRT  ?= 0xB000
 WIN0_DATA   ?= 0xB100
 
 CPPFLAGS   = -DCHKDISK_VERSION='"$(VERSION)"' \
+             -DCHKDISK_BUILD_DATE='"$(BUILD_DATE)"' \
              -DCHKDISK_LOG_ENABLE=$(LOG) \
              -DCHKDSK_FAT12=1 -DCHKDSK_FAT16=1 -DCHKDSK_FAT32=1
 

@@ -1,19 +1,23 @@
+        d8b                     d8b             d8b   d8,         d8b       
+        ?88                     ?88             88P  `8P          ?88       
+         88b                     88b           d88                 88b      
+ d8888b  888888b  d8888b d8888b  888  d88' d888888    88b .d888b,  888  d88'
+d8P' `P  88P `?8bd8b_,dPd8P' `P  888bd8P' d8P' ?88    88P ?8b,     888bd8P' 
+88b     d88   88P88b    88b     d88888b   88b  ,88b  d88    `?8b  d88888b   
+`?888P'd88'   88b`?888P'`?888P'd88' `?88b,`?88P'`88bd88' `?888P' d88' `?88b,
+
 CHKDSK для ZX Sprinter / Estex DSS
 ==================================
 
-(c) 2026 Dmitry Mikhalchenkov, Sprinter Team. Лицензия GPLv3.
+(c) 2026 Dmitry Mikhalchenkov, Sprinter Team. FidoNet: 2:5030/1997.10.
+Лицензия GPLv3.
 
 Утилита проверки и восстановления файловых систем FAT для дискет,
 IDE / CF / SD разделов и других носителей, доступных через DSS BIOS.
 
-
-КАКОЙ БИНАРНИК ЗАПУСКАТЬ
--------------------------
-
 Единый бинарник CHKDSK.EXE покрывает FAT12, FAT16 и FAT32 -- и для
 дискет, и для IDE / CF / SD разделов. Тип FAT определяется во время
-работы по BPB, выбирать нечего. (В ранних выпусках FAT12 шёл отдельным
-CHKDSK12.EXE; это разделение упразднено.)
+работы по BPB.
 
 
 КОМАНДНАЯ СТРОКА
@@ -213,7 +217,8 @@ bad-секторах, байт свободно, и геометрия в еди
 ПРИМЕР ВЫВОДА
 --------------
 
-  checkdsk 0.1.20260501 for Sprinter DSS
+  checkdsk 0.1.32 (19072026)
+  by Dmitry Mikhalchenkov
   Mode: read-only
   Phase 1: boot sector and BPB
     Type: FAT16, clusters: 32761

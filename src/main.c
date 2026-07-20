@@ -25,13 +25,21 @@
 #include "sectbuf.h"
 #include "prt.h"
 
+/* VERSION is X.Y.Z, each part an 8-bit field (0-255) per the project's
+ * versioning scheme -- Z is a build counter (see Makefile), not a date.
+ * BUILD_DATE is separate, purely informational build-date text shown
+ * alongside VERSION in the banner. */
 #ifndef CHKDISK_VERSION
 #define CHKDISK_VERSION "0.0.dev"
+#endif
+#ifndef CHKDISK_BUILD_DATE
+#define CHKDISK_BUILD_DATE "unknown"
 #endif
 
 static void print_banner(void)
 {
-    prt_str("checkdsk " CHKDISK_VERSION "\r\n");
+    prt_str("checkdsk " CHKDISK_VERSION " (" CHKDISK_BUILD_DATE ")\r\n");
+    prt_str("by Dmitry Mikhalchenkov\r\n");
 }
 
 static void print_usage(void)
